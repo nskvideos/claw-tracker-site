@@ -71,6 +71,8 @@
   .simple-readout .box .num{font-size:2.4rem;font-weight:700;color:var(--claw-dark);line-height:1;}
   .simple-readout .box .now-playing{font-size:1.05rem;font-weight:600;color:var(--ink);word-break:break-all;}
   .simple-readout .box .now-playing.none{color:var(--muted);font-weight:500;font-size:0.95rem;}
+  .player-tag-friend{color:#2f5fa8;font-weight:700;}
+  .player-tag-farmer{color:var(--alert);font-weight:700;}
   .simple-readout .box .cap{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin-top:6px;}
 
   .actions{display:flex;gap:10px;margin-bottom:6px;flex-wrap:wrap;}
@@ -136,9 +138,7 @@
 
   <div class="player-list-bar">
     <button class="ghost" id="retrievePlayersBtn" type="button">Retrieve player list</button>
-    <input id="playersCsvInput" type="file" accept=".csv,text/csv" hidden>
     <span class="player-list-status" id="playerListStatus">No player list loaded yet.</span>
-    <button class="icon-btn" id="uploadPlayersManualBtn" type="button" title="Only needed if players.csv isn't hosted here">Upload manually instead</button>
   </div>
 
   <button class="add-machine" id="addBtn">+ Add a machine to track</button>
@@ -152,11 +152,25 @@
 // from before.
 // ---------------------------------------------------------------------------
 const PLAYER_LIST_KEY = 'tc_player_list_v1';
+const PLAYER_TAGS_KEY = 'tc_player_tags_v1';
 let playerList = {};
+let playerTags = {}; // id -> 'friend' | 'farmer' (only these two are styled; anything else is just ignored)
 try { playerList = JSON.parse(localStorage.getItem(PLAYER_LIST_KEY) || '{}') || {}; } catch(e) { playerList = {}; }
+try { playerTags = JSON.parse(localStorage.getItem(PLAYER_TAGS_KEY) || '{}') || {}; } catch(e) { playerTags = {}; }
 function playerNameFor(id){
   const key=String(id || '').trim();
   return playerList[key] || key;
+}
+function playerTagFor(id){
+  return playerTags[String(id || '').trim()] || null;
+}
+// Wraps a player's display name in a span carrying the tag's color class,
+// if they have a recognized tag (friend/farmer) — used only where a player
+// is shown as currently active (now playing / in queue), not in history.
+function taggedPlayerHtml(id){
+  const name = escapeAttr(playerNameFor(id));
+  const tag = playerTagFor(id);
+  return tag ? `<span class="player-tag-${tag}">${name}</span>` : name;
 }
 function parsePlayerCsv(text){
   const rows=[]; let row=[], cell='', quoted=false;
@@ -185,23 +199,32 @@ function updatePlayerListStatus(){
 // Shared by both the auto-fetch and manual-upload paths: parses CSV text,
 // validates it has usable playerID/playerName rows, and — only if valid —
 // replaces the stored player list and persists it locally. Throws on
-// anything invalid so callers can show their own error message.
+// anything invalid so callers can show their own error message. A third
+// "tag" column is optional — only "friend" and "farmer" (case-insensitive)
+// are recognized; anything else in that column is just left unstyled.
 function applyPlayerCsvText(text, sourceLabel){
   const rows=parsePlayerCsv(text);
   if(!rows.length) throw new Error('The file is empty.');
   let start=0;
   const first=(rows[0][0] || '').replace(/^\ufeff/,'').trim().toLowerCase();
   if(first==='playerid' || first==='player id') start=1;
-  const next={};
+  const nextNames={};
+  const nextTags={};
   for(let i=start;i<rows.length;i++){
     const id=(rows[i][0] || '').trim();
     const name=(rows[i][1] || '').trim();
-    if(id && name) next[id]=name;
+    const tag=(rows[i][2] || '').trim().toLowerCase();
+    if(id && name){
+      nextNames[id]=name;
+      if(tag === 'friend' || tag === 'farmer') nextTags[id]=tag;
+    }
   }
-  if(!Object.keys(next).length) throw new Error('No valid playerID, playerName rows were found.');
-  playerList=next;
+  if(!Object.keys(nextNames).length) throw new Error('No valid playerID, playerName rows were found.');
+  playerList=nextNames;
+  playerTags=nextTags;
   playerListSource = sourceLabel;
   localStorage.setItem(PLAYER_LIST_KEY, JSON.stringify(playerList));
+  localStorage.setItem(PLAYER_TAGS_KEY, JSON.stringify(playerTags));
   updatePlayerListStatus();
 }
 
@@ -665,7 +688,7 @@ function renderTrackedCard(server, prefs, key){
       </div>
       <div class="link-hint ok">Editing these re-points this card at a different machine/prize (stops tracking the old pair, starts tracking the new one) — mainly useful to recover from the stale-prize warning above.</div>
       ${server.liveStatus ? `<div class="live-status ${server.liveStatus.ok ? 'ok' : 'err'}">${escapeAttr(server.liveStatus.msg)}</div>` : '<div class="live-status">Not connected yet.</div>'}
-      ${server.lastFields ? `<div class="live-fields"><span>status: <b>${escapeAttr(lastFields.status || '—')}</b></span><span>viewers: <b>${lastFields.viewerCount ?? '—'}</b></span><span>maintenance: <b>${lastFields.isMaintenance ? 'yes' : 'no'}</b></span>${lastFields.currentPlayingUser ? `<span>current player: <b>${escapeAttr(playerNameFor(lastFields.currentPlayingUser.id) || '—')}</b></span>` : ''}</div>` : ''}
+      ${server.lastFields ? `<div class="live-fields"><span>status: <b>${escapeAttr(lastFields.status || '—')}</b></span><span>viewers: <b>${lastFields.viewerCount ?? '—'}</b></span><span>maintenance: <b>${lastFields.isMaintenance ? 'yes' : 'no'}</b></span>${lastFields.currentPlayingUser ? `<span>current player: <b>${taggedPlayerHtml(lastFields.currentPlayingUser.id)}</b></span>` : ''}</div>` : ''}
     </div>
 
     <div class="simple-readout">
@@ -675,7 +698,7 @@ function renderTrackedCard(server, prefs, key){
       </div>
       <div class="box">
         ${lastFields.currentPlayingUser
-          ? `<div class="now-playing">${escapeAttr(playerNameFor(lastFields.currentPlayingUser.id))}</div>`
+          ? `<div class="now-playing">${taggedPlayerHtml(lastFields.currentPlayingUser.id)}</div>`
           : `<div class="now-playing none">No one right now</div>`}
         <div class="cap">Now playing</div>
       </div>
@@ -685,7 +708,7 @@ function renderTrackedCard(server, prefs, key){
     <div class="simple-readout">
       <div class="box">
         <div class="num">${lastFields.queuedUsers.length}</div>
-        <div class="cap">In queue — ${lastFields.queuedUsers.map(u => escapeAttr(playerNameFor(u.id))).join(', ')}</div>
+        <div class="cap">In queue — ${lastFields.queuedUsers.map(u => taggedPlayerHtml(u.id)).join(', ')}</div>
       </div>
     </div>` : ''}
 
@@ -693,7 +716,7 @@ function renderTrackedCard(server, prefs, key){
     <div class="simple-readout">
       <div class="box" style="background:linear-gradient(135deg, #fdeee0, #fff8ea);border-color:#f0d9a0;">
         <div class="num">🏆 ${server.lastAutoWin.count}</div>
-        <div class="cap">Total plays at last win — ${escapeAttr(playerNameFor(server.lastAutoWin.player) || 'unknown player')} at ${fmtTime(server.lastAutoWin.time)}</div>
+        <div class="cap">Total plays at last win — ${server.lastAutoWin.player ? taggedPlayerHtml(server.lastAutoWin.player) : 'unknown player'} at ${fmtTime(server.lastAutoWin.time)}</div>
       </div>
     </div>` : ''}
 
@@ -711,7 +734,7 @@ function renderTrackedCard(server, prefs, key){
             ${history.slice().reverse().slice(0,80).map(h => `
               <tr class="${h.isWin ? 'win' : ''}">
                 <td class="step-num">${h.step}: ${h.isWin ? '<span class="trophy">🏆</span>' : '<span class="lose-x">✕</span>'}</td>
-                <td>${h.player ? `<span class="player-link">${escapeAttr(playerNameFor(h.player))}</span>` : '<span style="color:var(--muted);font-style:italic;">unknown</span>'}</td>
+                <td>${h.player ? `<span class="player-link">${taggedPlayerHtml(h.player)}</span>` : '<span style="color:var(--muted);font-style:italic;">unknown</span>'}</td>
                 <td><span class="time-link">${fmtTime(h.t)}</span></td>
               </tr>`).join('')}
             </tbody>
@@ -912,11 +935,11 @@ document.getElementById('machines').addEventListener('click', (e) => {
   }
 });
 
-// Primary path: fetch players.csv from this same site (it's a static site,
-// so a players.csv file committed into the site's own GitHub repo, right
-// alongside index.html, is served at this same relative URL automatically
-// — no per-person file needed, and everyone always gets whatever the repo
-// currently has).
+// Fetches players.csv from this same site — it's a static site, so a
+// players.csv file committed into the site's own GitHub repo, right
+// alongside index.html, is served at this same relative URL automatically.
+// No per-person file needed; everyone always gets whatever the repo
+// currently has.
 document.getElementById('retrievePlayersBtn').addEventListener('click', async () => {
   const btn = document.getElementById('retrievePlayersBtn');
   const originalLabel = btn.textContent;
@@ -924,7 +947,7 @@ document.getElementById('retrievePlayersBtn').addEventListener('click', async ()
   btn.textContent = 'Retrieving…';
   try{
     const res = await fetch('players.csv', {cache: 'no-store'});
-    if(!res.ok) throw new Error(`players.csv not found on this site (HTTP ${res.status}). Ask whoever maintains the dashboard to add one to the GitHub repo, or use "Upload manually instead".`);
+    if(!res.ok) throw new Error(`players.csv not found on this site (HTTP ${res.status}). Ask whoever maintains the dashboard to add it to the GitHub repo.`);
     applyPlayerCsvText(await res.text(), 'from players.csv on this site');
     render();
   }catch(err){
@@ -933,22 +956,6 @@ document.getElementById('retrievePlayersBtn').addEventListener('click', async ()
     btn.disabled = false;
     btn.textContent = originalLabel;
   }
-});
-
-// Fallback path: same as before — pick a local CSV file by hand. Mainly
-// useful for testing a list before committing it, or if the shared file
-// genuinely isn't set up yet.
-document.getElementById('uploadPlayersManualBtn').addEventListener('click', () => {
-  document.getElementById('playersCsvInput').click();
-});
-document.getElementById('playersCsvInput').addEventListener('change', async e => {
-  const file=e.target.files && e.target.files[0];
-  if(!file) return;
-  try{
-    applyPlayerCsvText(await file.text(), 'from a manually uploaded file');
-    render();
-  }catch(err){ alert('Could not load that file: '+err.message); }
-  finally{ e.target.value=''; }
 });
 updatePlayerListStatus();
 
