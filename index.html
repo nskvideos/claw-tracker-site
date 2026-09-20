@@ -121,7 +121,7 @@
 <div class="wrap">
   <header>
     <h1>Plays Since Last Win</h1>
-    <div class="sub">Connects to a machine's real-time status feed and counts plays live as they happen. <b>Usernames and any past-history rows are always entered by hand</b> — this tool never fetches or scrapes the winner-history page automatically.</div>
+    <div class="sub">Connects to a machine's real-time status feed and counts plays live as they happen. Play counts, win detection, and history are <b>shared with everyone watching this dashboard</b> — tracked by the relay itself, not this browser. <b>Usernames and any past-history rows are always entered by hand</b> — this tool never fetches or scrapes the winner-history page automatically.</div>
   </header>
 
   <div class="global-bar" id="globalBar"></div>
@@ -134,11 +134,14 @@
 
   <button class="add-machine" id="addBtn">+ Add a machine to track</button>
 
-  <div id="machines"><div class="loading">Loading saved machines…</div></div>
+  <div id="machines"><div class="loading">Connecting to relay…</div></div>
 </div>
 
 <script>
-const STORAGE_KEY = 'tc_machines_v3';
+// ---------------------------------------------------------------------------
+// Player-list CSV import — entirely local, unrelated to the relay. Unchanged
+// from before.
+// ---------------------------------------------------------------------------
 const PLAYER_LIST_KEY = 'tc_player_list_v1';
 let playerList = {};
 try { playerList = JSON.parse(localStorage.getItem(PLAYER_LIST_KEY) || '{}') || {}; } catch(e) { playerList = {}; }
@@ -166,68 +169,50 @@ function updatePlayerListStatus(){
   if(el) el.textContent=Object.keys(playerList).length ? `${Object.keys(playerList).length} players loaded.` : 'No CSV loaded yet. Choose players.csv when ready.';
 }
 
-let machines = [];
-let loaded = false;
-const sockets = {};      // machine id -> WebSocket
-const pingTimers = {};   // machine id -> keepalive interval
-// Defaults to the local relay (ws_proxy.py) since the direct connection to
-// tokyocatch.com never pushes live data to a browser (Origin header issue).
-// Run "python3 ws_proxy.py" before connecting, or change this per-machine
-// back to wss://api.tokyocatch.com/subscriptions/v2 if you don't need it.
-const WS_URL = 'https://tc-relay-ver1.onrender.com';
+// ---------------------------------------------------------------------------
+// State model
+//
+// The relay is now the single source of truth for which machines exist, plus
+// their livePlays/lastStatus/history/lastAutoWin/prize info — that's
+// `serverMachines`, rebuilt from the relay's broadcasts. Everything personal
+// (display name override, alert threshold, THREE_CLAW rate, section
+// collapse state) stays local, keyed by "machineId:prizeId" in `localPrefs`.
+// A machine being added but not yet sent to the relay lives in `drafts`
+// until "Connect live" is clicked.
+// ---------------------------------------------------------------------------
+const PREFS_KEY = 'tc_local_prefs_v1';
+const RELAY_URL = 'https://tc-relay-ver1.onrender.com/';
 
+let loaded = false;
+let serverMachines = [];   // full state objects as broadcast by the relay
+let localPrefs = {};       // machineKey -> personal settings (see defaultPrefs)
+let drafts = [];           // machines being added, not yet tracked by the relay
+
+try{ localPrefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}; }catch(e){ localPrefs = {}; }
+
+function machineKey(machineId, prizeId){ return `${machineId}:${prizeId}`; }
 function uid(){ return 'm_' + Math.random().toString(36).slice(2, 10); }
 
-async function load(){
-  try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    machines = raw ? JSON.parse(raw) : [];
-  }catch(e){
-    console.error('Storage error', e);
-    machines = []; // corrupted or missing — start fresh
-  }
-  loaded = true;
-  render();
-  machines.forEach(m => { if(m.live) connectSocket(m.id); });
-}
-
-async function save(){
-  try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(machines));
-  }catch(e){ console.error('Storage error', e); }
-}
-
-function blankMachine(name, machineId, prizeId){
+function defaultPrefs(){
   return {
-    id: uid(),
-    name: name || 'New machine',
-    machineId: machineId || '',
-    prizeId: prizeId || '',
-    gameLink: (machineId && prizeId) ? `https://tokyocatch.com/game/${machineId}-${prizeId}` : '',
-    wsUrl: WS_URL,           // the live-update WebSocket endpoint; shouldn't normally need changing
-    livePlays: 0,             // plays detected by this tool since connecting / since the last win
-    lastStatus: null,        // last machine status seen (playable/play_wait/playing/continue/get)
-    lastAutoWin: null,       // {count, player, time} snapshot from the last auto-detected "get" win
-    live: false,
-    liveStatus: null,
-    lastFields: null,        // {status, viewerCount, isMaintenance, currentPlayingUser, queuedUsers}
-    prizeTitleEn: null,      // from MACHINE_INIT data.prize.title.en
-    prizeTitleJa: null,      // from MACHINE_INIT data.prize.title.ja
-    gemCost: null,           // from MACHINE_INIT data.prize.gemCost
-    machineType: null,       // from MACHINE_INIT data.machineType
-    alertEnabled: false,     // user controls alerts regardless of machine type
-    alertPlayTarget: null,   // play milestone entered by user
-    alertPlayFired: false,   // prevents repeat playback for the same target
-    pendingPlayer: '',       // username you've typed in for the play currently in progress
-    prizeStale: false,       // true when the server reports IRRELEVANT_PRIZE_FOR_MACHINE — the machine moved on to a different prize
-    threeClawUsualRate: 28,        // THREE_CLAW only: usual number of plays until a guaranteed payout
-    threeClawLastPayoutOwed: null, // THREE_CLAW only: (previous Payout, or Usual rate if none yet) − actual play count at win, auto-filled on win, editable
-    threeClawPayout: null,         // THREE_CLAW only: computed payout (Usual rate + Last Payout owed) — recomputing with unchanged inputs always gives the same answer
-    collapsed: false,              // true when the card is shown compact (title + Plays/Alert At summary only)
-    alertSectionCollapsed: false,  // true when the Play-count sound alert section is minimized (still runs in the background)
-    payoutSectionCollapsed: false, // true when the Fixed payout tracker section is minimized (still runs in the background)
-    history: []
+    name: null,                    // null = fall back to the relay's prize title, then the key
+    alertEnabled: false,
+    alertPlayTarget: null,
+    alertPlayFired: false,
+    threeClawUsualRate: 28,
+    threeClawLastPayoutOwed: null,
+    threeClawPayout: null,
+    collapsed: false,
+    alertSectionCollapsed: false,
+    payoutSectionCollapsed: false,
   };
+}
+function getPrefs(key){
+  if(!localPrefs[key]) localPrefs[key] = defaultPrefs();
+  return localPrefs[key];
+}
+function savePrefs(){
+  try{ localStorage.setItem(PREFS_KEY, JSON.stringify(localPrefs)); }catch(e){ console.error('Storage error', e); }
 }
 
 function fmtTime(iso){
@@ -248,425 +233,134 @@ function beep(){
     o.start(); o.stop(ctx.currentTime + 0.5);
   }catch(e){}
 }
-function playCountAlert(m){
-  beep();
-  notify('Play-count alert', `${m.name} reached play ${m.livePlays}.`);
-}
-function checkPlayCountAlert(m){
-  const target = Number(m.alertPlayTarget);
-  if(m.alertEnabled && Number.isInteger(target) && target > 0 &&
-     !m.alertPlayFired && m.livePlays >= target){
-    m.alertPlayFired = true;
-    playCountAlert(m);
-    save();
-  }
-}
-
 function notify(title, body){
   if(window.Notification && Notification.permission === 'granted'){
     try{ new Notification(title, {body}); }catch(e){}
   }
 }
+function playCountAlert(name, livePlays){
+  beep();
+  notify('Play-count alert', `${name} reached play ${livePlays}.`);
+}
+// Personal alert threshold — checked locally against whatever livePlays the
+// relay just broadcast. alertPlayFired lives in localPrefs so it doesn't
+// re-fire every time this machine's update arrives.
+function checkPlayCountAlert(prefs, livePlays, name){
+  const target = Number(prefs.alertPlayTarget);
+  if(prefs.alertEnabled && Number.isInteger(target) && target > 0 &&
+     !prefs.alertPlayFired && livePlays >= target){
+    prefs.alertPlayFired = true;
+    playCountAlert(name, livePlays);
+    savePrefs();
+  }
+}
 
+// ---------------------------------------------------------------------------
+// Relay connection — ONE shared WebSocket for every tracked machine, not one
+// per machine like before. The relay owns counting/win-detection/history;
+// this client only reacts to what it broadcasts.
+// ---------------------------------------------------------------------------
+let socket = null;
+let reconnectTimer = null;
+let socketStatus = {ok:false, msg:'Connecting to relay…'};
+
+function connectRelay(){
+  if(socket) return;
+  try{
+    socket = new WebSocket(RELAY_URL);
+  }catch(e){
+    socketStatus = {ok:false, msg:'Could not open WebSocket: ' + e.message};
+    render();
+    scheduleReconnect();
+    return;
+  }
+
+  socket.onopen = () => {
+    socketStatus = {ok:true, msg:'Connected to relay'};
+    sendToRelay({type:'listMachines'});
+    render();
+  };
+
+  socket.onmessage = (ev) => {
+    let msg;
+    try{ msg = JSON.parse(ev.data); }catch(e){ return; }
+
+    if(msg.type === 'machineList'){
+      serverMachines = msg.data || [];
+      render();
+    } else if(msg.type === 'machineUpdate'){
+      const key = machineKey(msg.data.machineId, msg.data.prizeId);
+      const idx = serverMachines.findIndex(x => machineKey(x.machineId, x.prizeId) === key);
+      const prev = idx >= 0 ? serverMachines[idx] : null;
+      handleIncomingMachineUpdate(prev, msg.data, key);
+      if(idx >= 0) serverMachines[idx] = msg.data; else serverMachines.push(msg.data);
+      render();
+    } else if(msg.type === 'machineRemoved'){
+      const key = machineKey(msg.data.machineId, msg.data.prizeId);
+      serverMachines = serverMachines.filter(x => machineKey(x.machineId, x.prizeId) !== key);
+      render();
+    } else if(msg.type === 'trackingError'){
+      alert('Could not start tracking: ' + ((msg.data && msg.data.message) || 'unknown error'));
+    }
+    // 'ping' and anything else from the relay is a no-op here.
+  };
+
+  socket.onerror = () => {
+    socketStatus = {ok:false, msg:'WebSocket error — the relay may be waking up (Render free tier sleeps when idle) or unreachable.'};
+    render();
+  };
+
+  socket.onclose = () => {
+    socket = null;
+    socketStatus = {ok:false, msg:'Disconnected from relay. Reconnecting in 5s…'};
+    render();
+    scheduleReconnect();
+  };
+}
+
+function scheduleReconnect(){
+  if(reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connectRelay(); }, 5000);
+}
+
+function sendToRelay(obj){
+  if(socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(obj));
+}
+
+// Local-only side effects of a machineUpdate: sound/notification alerts and
+// the THREE_CLAW payout math both depend on this browser's personal
+// settings, so they're computed here rather than trusted from the server.
+function handleIncomingMachineUpdate(prev, next, key){
+  const prefs = getPrefs(key);
+  const name = prefs.name || next.prizeTitleEn || next.prizeTitleJa || key;
+
+  const prevWinTime = prev && prev.lastAutoWin ? prev.lastAutoWin.time : null;
+  const nextWinTime = next.lastAutoWin ? next.lastAutoWin.time : null;
+  if(nextWinTime && nextWinTime !== prevWinTime){
+    beep();
+    notify(`${name}: win detected!`, `Won after ${next.lastAutoWin.count} play${next.lastAutoWin.count === 1 ? '' : 's'} — ${playerNameFor(next.lastAutoWin.player) || 'unknown player'}.`);
+    if(Number.isFinite(prefs.threeClawUsualRate)){
+      const priorPayout = Number.isFinite(prefs.threeClawPayout) ? prefs.threeClawPayout : prefs.threeClawUsualRate;
+      prefs.threeClawLastPayoutOwed = priorPayout - next.lastAutoWin.count;
+      prefs.threeClawPayout = prefs.threeClawUsualRate + prefs.threeClawLastPayoutOwed;
+    }
+    prefs.alertPlayFired = false; // a new session is starting — re-arm the play-count alert for it
+    savePrefs();
+  }
+
+  checkPlayCountAlert(prefs, next.livePlays, name);
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 function updateGlobalBar(){
   const bar = document.getElementById('globalBar');
   if(!loaded){ bar.innerHTML = ''; return; }
-  const liveCount = machines.filter(m => m.live).length;
   bar.innerHTML = `
-    <div><span class="status-dot ${liveCount > 0 ? 'live' : ''}"></span>${liveCount} of ${machines.length} machine${machines.length === 1 ? '' : 's'} connected live</div>
-    <div>Saved locally to this browser</div>
+    <div><span class="status-dot ${socketStatus.ok ? 'live' : ''}"></span>${escapeAttr(socketStatus.msg)}</div>
+    <div>${serverMachines.length} machine${serverMachines.length === 1 ? '' : 's'} tracked — shared with everyone watching this dashboard</div>
   `;
-}
-
-// Called on MACHINE_INIT, MACHINE_STATUS_UPDATED, and MACHINE_QUEUE_UPDATED alike.
-// A play is counted as "completed" when status transitions INTO playable from
-// anything else — i.e. a play_wait/playing/continue cycle just finished.
-// Win detection isn't confirmed from the captured protocol yet, so wins still
-// rely on the manual "It just won" button below.
-function handleStatusData(m, data){
-  const status = data.status;
-  const playerId = data.currentPlayingUser ? data.currentPlayingUser.id : null;
-
-  // A new play begins when status moves INTO "playing" from either play_wait
-  // (a fresh play starting) or continue (another attempt in the same session).
-  if(status === 'playing' && (m.lastStatus === 'play_wait' || m.lastStatus === 'continue')){
-    m.livePlays += 1;
-    checkPlayCountAlert(m);
-    m.history.push({
-      t: new Date().toISOString(),
-      step: m.livePlays,
-      sinceWin: m.livePlays,
-      player: m.pendingPlayer || playerId || '',
-      isWin: false
-    });
-    m.pendingPlayer = '';
-  }
-  // "get" is the confirmed win signal: log it, snapshot the count that led to
-  // it, then reset the running counter back to zero.
-  else if(status === 'get' && m.lastStatus !== 'get'){
-    const winPlayer = m.pendingPlayer || playerId || '';
-    const lastRow = m.history.length > 0 ? m.history[m.history.length - 1] : null;
-    if(lastRow && !lastRow.isWin){
-      // this is the same attempt we already logged at the play_wait/continue -> playing
-      // transition — flip it to a win instead of adding a separate row for it.
-      lastRow.isWin = true;
-      if(!lastRow.player && winPlayer) lastRow.player = winPlayer;
-    } else {
-      // no matching row to update (e.g. "get" arrived with no prior logged attempt) — log one directly.
-      m.history.push({
-        t: new Date().toISOString(),
-        step: m.livePlays,
-        sinceWin: m.livePlays,
-        player: winPlayer,
-        isWin: true
-      });
-    }
-    m.lastAutoWin = { count: m.livePlays, player: winPlayer, time: new Date().toISOString() };
-    beep();
-    notify(`${m.name}: win detected!`, `Won after ${m.livePlays} play${m.livePlays === 1 ? '' : 's'} — ${winPlayer || 'unknown player'}.`);
-    // Fixed-payout tracker: measure the deviation against whatever Payout was
-    // predicted going into this round (or Usual rate if there's no history
-    // yet) — NOT against the fixed Usual rate itself. This is what makes a
-    // win landing exactly on the predicted Payout reset the deviation to 0.
-    if(Number.isFinite(m.threeClawUsualRate)){
-      const priorPayout = Number.isFinite(m.threeClawPayout) ? m.threeClawPayout : m.threeClawUsualRate;
-      m.threeClawLastPayoutOwed = priorPayout - m.livePlays;
-      m.threeClawPayout = m.threeClawUsualRate + m.threeClawLastPayoutOwed; // auto-compute right away, no click needed
-    }
-    m.livePlays = 0;
-    m.pendingPlayer = '';
-    m.alertPlayFired = false; // a new session is starting — re-arm the play-count alert for it
-  }
-  // "playing" -> "continue" means this attempt didn't win yet; no count change.
-  // status -> "playable" means the player stopped; no count change either way.
-
-  // Only MACHINE_INIT carries these — capture once and keep them for the life of the card.
-  if(data.machineType !== undefined) m.machineType = data.machineType;
-  if(data.prize){
-    if(data.prize.title){
-      if(data.prize.title.en !== undefined) m.prizeTitleEn = data.prize.title.en;
-      if(data.prize.title.ja !== undefined) m.prizeTitleJa = data.prize.title.ja;
-    }
-    if(data.prize.gemCost !== undefined) m.gemCost = data.prize.gemCost;
-  }
-
-  if(status) m.lastStatus = status;
-  const prev = m.lastFields || {};
-  m.lastFields = {
-    status: status ?? prev.status ?? null,
-    viewerCount: data.viewerCount ?? prev.viewerCount ?? null,
-    isMaintenance: data.isMaintenance ?? prev.isMaintenance ?? false,
-    currentPlayingUser: data.currentPlayingUser !== undefined ? data.currentPlayingUser : (prev.currentPlayingUser ?? null),
-    queuedUsers: data.queuedUsers !== undefined ? data.queuedUsers : (prev.queuedUsers ?? [])
-  };
-}
-
-function connectSocket(id){
-  disconnectSocket(id);
-  const m = machines.find(x => x.id === id);
-  if(!m || !m.machineId || !m.prizeId) return;
-
-  let ws;
-  try{
-    ws = new WebSocket(m.wsUrl || WS_URL);
-  }catch(e){
-    m.liveStatus = {ok:false, msg: 'Could not open WebSocket: ' + e.message};
-    render();
-    return;
-  }
-  sockets[id] = ws;
-
-  ws.onopen = async () => {
-    ws.send(JSON.stringify({type:'machineSubscription', data:{id:m.machineId, prizeId:m.prizeId, type:'view'}}));
-    ws.send(JSON.stringify({type:'initClient', data:{device:'web', clientVersion:'44e8d84', language:'en'}}));
-    const mm = machines.find(x => x.id === id);
-    if(mm){ mm.liveStatus = {ok:true, msg:'Connected — waiting for machine data…'}; await save(); render(); }
-    pingTimers[id] = setInterval(() => {
-      if(ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'ping'}));
-    }, 15000);
-  };
-
-  ws.onmessage = async (ev) => {
-    let msg;
-    try{ msg = JSON.parse(ev.data); }catch(e){ return; }
-    const mm = machines.find(x => x.id === id);
-    if(!mm) return;
-
-    // Server-side errors arrive as a normal message with an `error` object instead
-    // of `data` — e.g. IRRELEVANT_PRIZE_FOR_MACHINE means the machine has moved on
-    // to a different prize than the one we're subscribed to. Flag it clearly and
-    // stop counting plays against the stale prize until the link is corrected.
-    if(msg.error){
-      if(msg.error.code === 'IRRELEVANT_PRIZE_FOR_MACHINE'){
-        if(!mm.prizeStale){
-          mm.prizeStale = true;
-          notify(`${mm.name}: prize changed`, 'This machine has moved on to a different prize. Tracking paused — update the prize link.');
-        }
-        mm.liveStatus = {ok:false, msg:'⚠️ Prize no longer on this machine — see warning above. Plays have paused counting.'};
-      } else {
-        mm.liveStatus = {ok:false, msg:'Server error: ' + (msg.error.message || msg.error.code || 'unknown error')};
-      }
-      await save();
-      render();
-      return;
-    }
-
-    if(msg.type === 'MACHINE_INIT' || msg.type === 'MACHINE_STATUS_UPDATED' || msg.type === 'MACHINE_QUEUE_UPDATED'){
-      if(mm.prizeStale){
-        // Ignore further status data until the prize link is corrected — otherwise
-        // plays for the machine's new prize would silently get counted as if they
-        // still belonged to the old one.
-        return;
-      }
-      handleStatusData(mm, msg.data || {});
-      mm.liveStatus = {ok:true, msg:'Live — last update ' + new Date().toLocaleTimeString()};
-      await save();
-      render();
-    }
-    // other message types (pings, etc.) are ignored
-  };
-
-  ws.onerror = () => {
-    const mm = machines.find(x => x.id === id);
-    if(mm){ mm.liveStatus = {ok:false, msg:'WebSocket error — connection may be blocked, or the machine/prize IDs may be wrong.'}; render(); }
-  };
-
-  ws.onclose = (ev) => {
-    clearInterval(pingTimers[id]); delete pingTimers[id];
-    delete sockets[id];
-    const mm = machines.find(x => x.id === id);
-    if(mm && mm.live){
-      mm.liveStatus = {ok:false, msg:`Connection closed (code ${ev.code}). Reconnecting in 5s…`};
-      render();
-      setTimeout(() => {
-        const m2 = machines.find(x => x.id === id);
-        if(m2 && m2.live) connectSocket(id);
-      }, 5000);
-    }
-  };
-}
-
-function disconnectSocket(id){
-  if(pingTimers[id]){ clearInterval(pingTimers[id]); delete pingTimers[id]; }
-  if(sockets[id]){
-    try{ sockets[id].onclose = null; sockets[id].close(); }catch(e){}
-    delete sockets[id];
-  }
-}
-
-function render(){
-  updateGlobalBar();
-  const root = document.getElementById('machines');
-  root.innerHTML = '';
-  if(!loaded){ root.innerHTML = '<div class="loading">Loading saved machines…</div>'; return; }
-  if(machines.length === 0){
-    root.innerHTML = '<div class="empty-state">No machines yet. Add one to start tracking.</div>';
-    return;
-  }
-  machines.forEach(m => {
-    const card = document.createElement('div');
-    card.className = 'machine' + (m.prizeStale ? ' alerting' : '');
-
-    card.innerHTML = `
-      <div class="machine-top">
-        ${m.collapsed
-          ? `<div class="machine-name-static" title="${escapeAttr(m.prizeTitleEn || m.prizeTitleJa || m.name)}">${escapeAttr(m.prizeTitleEn || m.prizeTitleJa || m.name)}</div>`
-          : `<input class="machine-name" value="${escapeAttr(m.name)}" data-id="${m.id}" data-field="name" />`}
-        <div class="top-actions">
-          <button class="icon-btn" data-id="${m.id}" data-action="toggle-collapse">${m.collapsed ? 'Expand ▾' : 'Collapse ▲'}</button>
-          <button class="icon-btn" data-id="${m.id}" data-action="remove">Remove</button>
-        </div>
-      </div>
-
-      ${m.collapsed ? `
-      <div class="machine-summary">
-        <span>Plays <b>${m.livePlays}</b></span>
-        <span>Alert at <b>${m.alertEnabled && m.alertPlayTarget ? m.alertPlayTarget : '—'}</b></span>
-      </div>
-      ` : `
-      ${m.prizeStale ? `
-      <div class="play-alert" style="background:#fdeceb;border-color:#e2a89a;">
-        <div class="play-alert-title" style="color:#8a2c1c;">⚠️ Prize no longer on this machine</div>
-        <div style="font-size:0.85rem;color:var(--ink);line-height:1.5;">
-          TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(m.prizeId)}</code>). Plays have paused counting so the numbers don't get mixed between prizes. Grab the machine's current prize link and paste it into "TokyoCatch prize link" below to resume tracking.
-        </div>
-      </div>` : ''}
-
-      ${m.prizeTitleEn || m.prizeTitleJa || m.gemCost != null || m.machineType ? `
-      <div class="prize-info">
-        ${m.prizeTitleEn ? `<div class="prize-title-en">${escapeAttr(m.prizeTitleEn)}</div>` : ''}
-        ${m.prizeTitleJa ? `<div class="prize-title-ja">${escapeAttr(m.prizeTitleJa)}</div>` : ''}
-        <div class="prize-meta">${m.gemCost != null ? `Gem cost: <b>${escapeAttr(m.gemCost)}</b>` : ''}${m.gemCost != null && m.machineType ? ' &nbsp;·&nbsp; ' : ''}${m.machineType ? `Machine type: <b>${escapeAttr(m.machineType)}</b>` : ''}</div>
-      </div>` : ''}
-
-      <div class="play-alert">
-        <div class="play-alert-title-row">
-          <div class="play-alert-title">🔔 Play-count sound alert</div>
-          <button class="icon-btn" data-id="${m.id}" data-action="toggle-alert-section">${m.alertSectionCollapsed ? 'Show ▾' : 'Hide ▲'}</button>
-        </div>
-        ${m.alertSectionCollapsed ? `
-        <div class="play-alert-status" style="margin-top:0;">
-          Minimized — still running in the background. ${m.alertEnabled && m.alertPlayTarget ? `Armed for play ${m.alertPlayTarget}; current count is ${m.livePlays}.` : 'Alert is disabled.'}
-        </div>
-        ` : `
-        <div class="play-alert-row">
-          <label class="play-alert-toggle">
-            <input type="checkbox" ${m.alertEnabled ? 'checked' : ''} data-id="${m.id}" data-field="alertEnabled" /> Enable alert
-          </label>
-          <input type="number" min="1" step="1" placeholder="Alert at play (e.g. 24)" value="${m.alertPlayTarget || ''}" data-id="${m.id}" data-field="alertPlayTarget" />
-          <button class="ghost" data-id="${m.id}" data-action="set-alert">Set / re-arm</button>
-          <button class="ghost" data-id="${m.id}" data-action="test-alert">Test sound</button>
-          <button class="ghost" data-id="${m.id}" data-action="clear-alert">Clear</button>
-        </div>
-        <div class="play-alert-status ${m.alertEnabled && m.alertPlayTarget && !m.alertPlayFired ? 'armed' : ''}">
-          ${!m.alertEnabled ? 'Alert is disabled. Check Enable alert to use it for any machine type.' :
-            (!m.alertPlayTarget ? 'Enabled. Enter a play number and click Set / re-arm.' :
-            (m.alertPlayFired ? `Alert fired at play ${m.alertPlayTarget}. Set another target to re-arm.` :
-            `Armed for play ${m.alertPlayTarget}; current count is ${m.livePlays}. Machine type: ${escapeAttr(m.machineType || 'not identified')}.`))}
-        </div>
-        `}
-      </div>
-
-      ${m.machineType === 'THREE_CLAW' ? `
-      <div class="play-alert">
-        <div class="play-alert-title-row">
-          <div class="play-alert-title">🎯 Fixed payout tracker (THREE_CLAW)</div>
-          <button class="icon-btn" data-id="${m.id}" data-action="toggle-payout-section">${m.payoutSectionCollapsed ? 'Show ▾' : 'Hide ▲'}</button>
-        </div>
-        ${m.payoutSectionCollapsed ? `
-        <div class="play-alert-status" style="margin-top:0;">
-          Minimized — still running in the background. Payout: <b>${m.threeClawPayout != null ? m.threeClawPayout : '—'}</b>
-        </div>
-        ` : `
-        <div class="play-alert-row">
-          <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
-            Usual Payout rate
-            <input type="number" min="1" step="1" value="${m.threeClawUsualRate != null ? m.threeClawUsualRate : ''}" data-id="${m.id}" data-field="threeClawUsualRate" style="width:120px;" />
-          </label>
-          <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
-            Last Payout owed
-            <input type="number" step="1" value="${m.threeClawLastPayoutOwed != null ? m.threeClawLastPayoutOwed : ''}" data-id="${m.id}" data-field="threeClawLastPayoutOwed" style="width:120px;" />
-          </label>
-          <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
-            Payout
-            <div style="font-weight:800;font-size:1.1rem;padding:6px 0;">${m.threeClawPayout != null ? m.threeClawPayout : '—'}</div>
-          </label>
-          <button class="ghost" data-id="${m.id}" data-action="compute-payout">Compute</button>
-          <button class="ghost" data-id="${m.id}" data-action="reset-payout">Reset to usual rate</button>
-        </div>
-        <div class="play-alert-status">
-          On a win, "Last Payout owed" and "Payout" both update automatically — measured against whatever Payout was predicted going into that round (or Usual rate if there's no history yet), not the fixed rate. A negative number means the win came later than predicted. You can edit either field yourself and click Compute to recalculate.
-        </div>
-        `}
-      </div>` : ''}
-
-      ${m.machineId && m.prizeId ? `
-      <div class="quick-links">
-        <button data-id="${m.id}" data-action="open-tokyocatch" title="Open TokyoCatch without closing the tracker">🐙 TokyoCatch</button>
-        <button data-id="${m.id}" data-action="open-toreba" title="Open Toreba.Plus Annex history without closing the tracker">📊 Toreba.Plus Annex</button>
-      </div>` : ''}
-
-      <div class="live-config">
-        <label>TokyoCatch prize link</label>
-        <input type="text" placeholder="Please enter the TokyoCatch prize link here, e.g. https://tokyocatch.com/game/686abfea206128473c01e7dd-6a8409305d57c7003f6844ea" value="${escapeAttr(m.gameLink || (m.machineId && m.prizeId ? `https://tokyocatch.com/game/${m.machineId}-${m.prizeId}` : ''))}" data-id="${m.id}" data-field="gameLink" />
-
-        <div class="row">
-          <div>
-            <label>Machine ID</label>
-            <input type="text" placeholder="Machine ID" value="${escapeAttr(m.machineId)}" data-id="${m.id}" data-field="machineId" />
-          </div>
-          <div>
-            <label>Prize ID</label>
-            <input type="text" placeholder="Prize ID" value="${escapeAttr(m.prizeId)}" data-id="${m.id}" data-field="prizeId" />
-          </div>
-        </div>
-
-        <div class="link-hint ${m.machineId && m.prizeId ? 'ok' : 'err'}">
-          ${m.machineId && m.prizeId
-            ? 'IDs detected — you can edit them manually if needed.'
-            : 'No link entered yet — paste a TokyoCatch game link above to fill these in automatically.'}
-        </div>
-
-        <div style="margin-top:8px;">
-          <button class="${m.live ? 'primary' : 'ghost'}" style="width:100%;" data-id="${m.id}" data-action="toggle-live">${m.live ? 'Live — connected' : 'Connect live'}</button>
-        </div>
-        <label>WebSocket endpoint</label>
-        <input type="text" value="${escapeAttr(m.wsUrl)}" data-id="${m.id}" data-field="wsUrl" />
-        ${m.liveStatus ? `<div class="live-status ${m.liveStatus.ok?'ok':'err'}">${escapeAttr(m.liveStatus.msg)}</div>` : '<div class="live-status">Not connected yet.</div>'}
-        ${m.lastFields ? `<div class="live-fields"><span>status: <b>${escapeAttr(m.lastFields.status || '—')}</b></span><span>viewers: <b>${m.lastFields.viewerCount ?? '—'}</b></span><span>maintenance: <b>${m.lastFields.isMaintenance ? 'yes' : 'no'}</b></span>${m.lastFields.currentPlayingUser ? `<span>current player: <b>${escapeAttr(playerNameFor(m.lastFields.currentPlayingUser.id) || '—')}</b></span>` : ''}</div>` : ''}
-        <!-- Hidden per request — kept here for reference, not shown to users:
-        This defaults to the local relay, since a direct connection to tokyocatch.com never pushes
-        live data to a browser (Origin header check). Run python3 ws_proxy.py on your machine before
-        connecting. If you'd rather test the direct connection, change this field to
-        wss://api.tokyocatch.com/subscriptions/v2 — it'll connect but likely just sit at
-        "waiting for machine data." -->
-      </div>
-
-      <div class="simple-readout">
-        <div class="box">
-          <div class="num">${m.livePlays}</div>
-          <div class="cap">Plays counted this session</div>
-        </div>
-        <div class="box">
-          ${m.lastFields && m.lastFields.currentPlayingUser
-            ? `<div class="now-playing">${escapeAttr(playerNameFor(m.lastFields.currentPlayingUser.id))}</div>`
-            : `<div class="now-playing none">No one right now</div>`}
-          <div class="cap">Now playing</div>
-        </div>
-      </div>
-
-      ${m.lastFields && m.lastFields.queuedUsers && m.lastFields.queuedUsers.length > 0 ? `
-      <div class="simple-readout">
-        <div class="box">
-          <div class="num">${m.lastFields.queuedUsers.length}</div>
-          <div class="cap">In queue — ${m.lastFields.queuedUsers.map(u => escapeAttr(playerNameFor(u.id))).join(', ')}</div>
-        </div>
-      </div>` : ''}
-
-      ${m.lastAutoWin ? `
-      <div class="simple-readout">
-        <div class="box" style="background:linear-gradient(135deg, #fdeee0, #fff8ea);border-color:#f0d9a0;">
-          <div class="num">🏆 ${m.lastAutoWin.count}</div>
-          <div class="cap">Total plays at last win — ${escapeAttr(playerNameFor(m.lastAutoWin.player) || 'unknown player')} at ${fmtTime(m.lastAutoWin.time)}</div>
-        </div>
-      </div>` : ''}
-
-      <div class="actions">
-        <button class="ghost" data-id="${m.id}" data-action="resetwin">It just won — reset to 0</button>
-        <button class="ghost" data-id="${m.id}" data-action="notifperm">Enable browser notifications</button>
-        <button class="ghost danger" data-id="${m.id}" data-action="clearhistory">Clear history</button>
-      </div>
-
-      <details open>
-        <summary>Step history (${m.history.length})</summary>
-        <div class="history">
-          ${m.history.length === 0 ? '<div class="hist-empty">No entries yet — connect live, plays will appear here as they happen.</div>' :
-            `<table class="step-table">
-              <thead><tr><th class="step-num">Step</th><th>Played by</th><th>Play time</th></tr></thead>
-              <tbody>
-              ${m.history.slice().reverse().slice(0,80).map(h => `
-                <tr class="${h.isWin ? 'win' : ''}">
-                  <td class="step-num">${h.step}: ${h.isWin ? '<span class="trophy">🏆</span>' : '<span class="lose-x">✕</span>'}</td>
-                  <td>${h.player ? `<span class="player-link">${escapeAttr(playerNameFor(h.player))}</span>` : '<span style="color:var(--muted);font-style:italic;">unknown</span>'}</td>
-                  <td><span class="time-link">${fmtTime(h.t)}</span></td>
-                </tr>`).join('')}
-              </tbody>
-            </table>`}
-        </div>
-      </details>
-      <!-- Hidden per request — kept here for reference, not shown to users:
-      Counting method: a play is logged each time status moves into "playing" (from play_wait, or
-      from continue if the same session gets another attempt). A "get" status is treated as a
-      confirmed win — it's logged, the count at that point is shown above, and the counter resets
-      to zero. "It just won" below still works as a manual override if you see a win the feed
-      doesn't catch. Usernames aren't in the feed — type in what you see on the live stream before
-      a play finishes and it'll attach to that step; if you don't, the raw numeric ID is recorded
-      instead. Anyone waiting their turn shows up above as "In queue" whenever queuedUsers isn't
-      empty. Nothing before you connected (or while the tab was closed) is captured. -->
-      `}
-    `;
-    root.appendChild(card);
-  });
 }
 
 function escapeAttr(s){ return String(s ?? '').replace(/"/g, '&quot;'); }
@@ -674,169 +368,404 @@ function escapeAttr(s){ return String(s ?? '').replace(/"/g, '&quot;'); }
 function tokyoCatchUrl(m){
   return `https://tokyocatch.com/game/${m.machineId}-${m.prizeId}`;
 }
-
 function torebaPlusUrl(m){
   return `https://toreba.plus/annex/tkcatchhistory?mid=${encodeURIComponent(m.machineId + '-' + m.prizeId)}&pid=${encodeURIComponent(m.prizeId)}`;
 }
-
 function openPopup(url){
-  // Make only one request for a new browsing context. Omitting window-size features
-  // lets the browser treat this as a normal new tab rather than a popup window.
   const newTab = window.open(url, '_blank');
-  if(newTab){
-    // Prevent the opened page from accessing the tracker through window.opener.
-    newTab.opener = null;
-  }
+  if(newTab){ newTab.opener = null; }
 }
 
-document.getElementById('addBtn').addEventListener('click', async () => {
-  machines.unshift(blankMachine('New machine', '', ''));
-  await save(); render();
+const HEX24 = /^[0-9a-f]{24}$/i;
+
+function render(){
+  updateGlobalBar();
+  const root = document.getElementById('machines');
+  root.innerHTML = '';
+  if(!loaded){ root.innerHTML = '<div class="loading">Connecting to relay…</div>'; return; }
+
+  if(drafts.length === 0 && serverMachines.length === 0){
+    root.innerHTML = '<div class="empty-state">No machines yet. Add one to start tracking.</div>';
+    return;
+  }
+
+  drafts.forEach(d => {
+    const card = document.createElement('div');
+    card.className = 'machine';
+    card.innerHTML = renderDraftCard(d);
+    root.appendChild(card);
+  });
+
+  serverMachines.forEach(server => {
+    const key = machineKey(server.machineId, server.prizeId);
+    const prefs = getPrefs(key);
+    const card = document.createElement('div');
+    card.className = 'machine' + (server.prizeStale ? ' alerting' : '');
+    card.innerHTML = renderTrackedCard(server, prefs, key);
+    root.appendChild(card);
+  });
+}
+
+function renderDraftCard(d){
+  const idsValid = HEX24.test(d.machineId || '') && HEX24.test(d.prizeId || '');
+  return `
+    <div class="machine-top">
+      <input class="machine-name" value="${escapeAttr(d.name || '')}" placeholder="New machine" data-draft="${d.id}" data-field="name" />
+      <div class="top-actions">
+        <button class="icon-btn" data-draft="${d.id}" data-action="remove-draft">Remove</button>
+      </div>
+    </div>
+    <div class="live-config">
+      <label>TokyoCatch prize link</label>
+      <input type="text" placeholder="Paste a TokyoCatch game link here, e.g. https://tokyocatch.com/game/686abfea206128473c01e7dd-6a8409305d57c7003f6844ea" value="${escapeAttr(d.gameLink || '')}" data-draft="${d.id}" data-field="gameLink" />
+      <div class="row">
+        <div><label>Machine ID</label><input type="text" placeholder="Machine ID" value="${escapeAttr(d.machineId || '')}" data-draft="${d.id}" data-field="machineId" /></div>
+        <div><label>Prize ID</label><input type="text" placeholder="Prize ID" value="${escapeAttr(d.prizeId || '')}" data-draft="${d.id}" data-field="prizeId" /></div>
+      </div>
+      <div class="link-hint ${idsValid ? 'ok' : 'err'}">
+        ${idsValid
+          ? 'IDs detected — click Connect live to start tracking. This will be visible to everyone watching this dashboard.'
+          : 'No link entered yet — paste a TokyoCatch game link above to fill these in automatically.'}
+      </div>
+      <div style="margin-top:8px;">
+        <button class="primary" style="width:100%;" data-draft="${d.id}" data-action="connect-live">Connect live</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderTrackedCard(server, prefs, key){
+  const displayName = prefs.name || server.prizeTitleEn || server.prizeTitleJa || key;
+  const history = server.history || [];
+  const lastFields = server.lastFields || {};
+
+  return `
+    <div class="machine-top">
+      ${prefs.collapsed
+        ? `<div class="machine-name-static" title="${escapeAttr(displayName)}">${escapeAttr(displayName)}</div>`
+        : `<input class="machine-name" value="${escapeAttr(prefs.name || '')}" placeholder="${escapeAttr(server.prizeTitleEn || server.prizeTitleJa || 'New machine')}" data-key="${key}" data-field="name" />`}
+      <div class="top-actions">
+        <button class="icon-btn" data-key="${key}" data-action="toggle-collapse">${prefs.collapsed ? 'Expand ▾' : 'Collapse ▲'}</button>
+        <button class="icon-btn" data-key="${key}" data-action="remove">Stop tracking</button>
+      </div>
+    </div>
+
+    ${prefs.collapsed ? `
+    <div class="machine-summary">
+      <span>Plays <b>${server.livePlays}</b></span>
+      <span>Alert at <b>${prefs.alertEnabled && prefs.alertPlayTarget ? prefs.alertPlayTarget : '—'}</b></span>
+    </div>
+    ` : `
+    ${server.prizeStale ? `
+    <div class="play-alert" style="background:#fdeceb;border-color:#e2a89a;">
+      <div class="play-alert-title" style="color:#8a2c1c;">⚠️ Prize no longer on this machine</div>
+      <div style="font-size:0.85rem;color:var(--ink);line-height:1.5;">
+        TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(server.prizeId)}</code>). Plays have paused counting for everyone watching. Grab the machine's current prize link and paste it into "TokyoCatch prize link" below to resume tracking under the new prize.
+      </div>
+    </div>` : ''}
+
+    ${server.prizeTitleEn || server.prizeTitleJa || server.gemCost != null || server.machineType ? `
+    <div class="prize-info">
+      ${server.prizeTitleEn ? `<div class="prize-title-en">${escapeAttr(server.prizeTitleEn)}</div>` : ''}
+      ${server.prizeTitleJa ? `<div class="prize-title-ja">${escapeAttr(server.prizeTitleJa)}</div>` : ''}
+      <div class="prize-meta">${server.gemCost != null ? `Gem cost: <b>${escapeAttr(server.gemCost)}</b>` : ''}${server.gemCost != null && server.machineType ? ' &nbsp;·&nbsp; ' : ''}${server.machineType ? `Machine type: <b>${escapeAttr(server.machineType)}</b>` : ''}</div>
+    </div>` : ''}
+
+    <div class="play-alert">
+      <div class="play-alert-title-row">
+        <div class="play-alert-title">🔔 Play-count sound alert</div>
+        <button class="icon-btn" data-key="${key}" data-action="toggle-alert-section">${prefs.alertSectionCollapsed ? 'Show ▾' : 'Hide ▲'}</button>
+      </div>
+      ${prefs.alertSectionCollapsed ? `
+      <div class="play-alert-status" style="margin-top:0;">
+        Minimized — still running in the background. ${prefs.alertEnabled && prefs.alertPlayTarget ? `Armed for play ${prefs.alertPlayTarget}; current count is ${server.livePlays}.` : 'Alert is disabled.'}
+      </div>
+      ` : `
+      <div class="play-alert-row">
+        <label class="play-alert-toggle">
+          <input type="checkbox" ${prefs.alertEnabled ? 'checked' : ''} data-key="${key}" data-field="alertEnabled" /> Enable alert
+        </label>
+        <input type="number" min="1" step="1" placeholder="Alert at play (e.g. 24)" value="${prefs.alertPlayTarget || ''}" data-key="${key}" data-field="alertPlayTarget" />
+        <button class="ghost" data-key="${key}" data-action="set-alert">Set / re-arm</button>
+        <button class="ghost" data-key="${key}" data-action="test-alert">Test sound</button>
+        <button class="ghost" data-key="${key}" data-action="clear-alert">Clear</button>
+      </div>
+      <div class="play-alert-status ${prefs.alertEnabled && prefs.alertPlayTarget && !prefs.alertPlayFired ? 'armed' : ''}">
+        ${!prefs.alertEnabled ? 'Alert is disabled. Check Enable alert to use it for any machine type.' :
+          (!prefs.alertPlayTarget ? 'Enabled. Enter a play number and click Set / re-arm.' :
+          (prefs.alertPlayFired ? `Alert fired at play ${prefs.alertPlayTarget}. Set another target to re-arm.` :
+          `Armed for play ${prefs.alertPlayTarget}; current count is ${server.livePlays}. Machine type: ${escapeAttr(server.machineType || 'not identified')}.`))}
+        <br><span style="font-style:italic;">Alert settings are personal to this browser — only you get the sound/notification.</span>
+      </div>
+      `}
+    </div>
+
+    ${server.machineType === 'THREE_CLAW' ? `
+    <div class="play-alert">
+      <div class="play-alert-title-row">
+        <div class="play-alert-title">🎯 Fixed payout tracker (THREE_CLAW)</div>
+        <button class="icon-btn" data-key="${key}" data-action="toggle-payout-section">${prefs.payoutSectionCollapsed ? 'Show ▾' : 'Hide ▲'}</button>
+      </div>
+      ${prefs.payoutSectionCollapsed ? `
+      <div class="play-alert-status" style="margin-top:0;">
+        Minimized — still running in the background. Payout: <b>${prefs.threeClawPayout != null ? prefs.threeClawPayout : '—'}</b>
+      </div>
+      ` : `
+      <div class="play-alert-row">
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
+          Usual Payout rate
+          <input type="number" min="1" step="1" value="${prefs.threeClawUsualRate != null ? prefs.threeClawUsualRate : ''}" data-key="${key}" data-field="threeClawUsualRate" style="width:120px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
+          Last Payout owed
+          <input type="number" step="1" value="${prefs.threeClawLastPayoutOwed != null ? prefs.threeClawLastPayoutOwed : ''}" data-key="${key}" data-field="threeClawLastPayoutOwed" style="width:120px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
+          Payout
+          <div style="font-weight:800;font-size:1.1rem;padding:6px 0;">${prefs.threeClawPayout != null ? prefs.threeClawPayout : '—'}</div>
+        </label>
+        <button class="ghost" data-key="${key}" data-action="compute-payout">Compute</button>
+        <button class="ghost" data-key="${key}" data-action="reset-payout">Reset to usual rate</button>
+      </div>
+      <div class="play-alert-status">
+        On a win, "Last Payout owed" and "Payout" both update automatically on this browser — measured against whatever Payout was predicted going into that round (or Usual rate if there's no history yet), not the fixed rate. A negative number means the win came later than predicted. This rate is personal to this browser, not shared.
+      </div>
+      `}
+    </div>` : ''}
+
+    ${server.machineId && server.prizeId ? `
+    <div class="quick-links">
+      <button data-key="${key}" data-action="open-tokyocatch" title="Open TokyoCatch without closing the tracker">🐙 TokyoCatch</button>
+      <button data-key="${key}" data-action="open-toreba" title="Open Toreba.Plus Annex history without closing the tracker">📊 Toreba.Plus Annex</button>
+    </div>` : ''}
+
+    <div class="live-config">
+      <label>TokyoCatch prize link</label>
+      <input type="text" placeholder="Paste the corrected prize link here if this machine has moved on" value="${escapeAttr(`https://tokyocatch.com/game/${server.machineId}-${server.prizeId}`)}" data-key="${key}" data-field="gameLink" />
+      <div class="row">
+        <div>
+          <label>Machine ID</label>
+          <input type="text" placeholder="Machine ID" value="${escapeAttr(server.machineId)}" data-key="${key}" data-field="machineId" />
+        </div>
+        <div>
+          <label>Prize ID</label>
+          <input type="text" placeholder="Prize ID" value="${escapeAttr(server.prizeId)}" data-key="${key}" data-field="prizeId" />
+        </div>
+      </div>
+      <div class="link-hint ok">Editing these re-points this card at a different machine/prize (stops tracking the old pair, starts tracking the new one) — mainly useful to recover from the stale-prize warning above.</div>
+      ${server.liveStatus ? `<div class="live-status ${server.liveStatus.ok ? 'ok' : 'err'}">${escapeAttr(server.liveStatus.msg)}</div>` : '<div class="live-status">Not connected yet.</div>'}
+      ${server.lastFields ? `<div class="live-fields"><span>status: <b>${escapeAttr(lastFields.status || '—')}</b></span><span>viewers: <b>${lastFields.viewerCount ?? '—'}</b></span><span>maintenance: <b>${lastFields.isMaintenance ? 'yes' : 'no'}</b></span>${lastFields.currentPlayingUser ? `<span>current player: <b>${escapeAttr(playerNameFor(lastFields.currentPlayingUser.id) || '—')}</b></span>` : ''}</div>` : ''}
+    </div>
+
+    <div class="simple-readout">
+      <div class="box">
+        <div class="num">${server.livePlays}</div>
+        <div class="cap">Plays counted since last win</div>
+      </div>
+      <div class="box">
+        ${lastFields.currentPlayingUser
+          ? `<div class="now-playing">${escapeAttr(playerNameFor(lastFields.currentPlayingUser.id))}</div>`
+          : `<div class="now-playing none">No one right now</div>`}
+        <div class="cap">Now playing</div>
+      </div>
+    </div>
+
+    ${lastFields.queuedUsers && lastFields.queuedUsers.length > 0 ? `
+    <div class="simple-readout">
+      <div class="box">
+        <div class="num">${lastFields.queuedUsers.length}</div>
+        <div class="cap">In queue — ${lastFields.queuedUsers.map(u => escapeAttr(playerNameFor(u.id))).join(', ')}</div>
+      </div>
+    </div>` : ''}
+
+    ${server.lastAutoWin ? `
+    <div class="simple-readout">
+      <div class="box" style="background:linear-gradient(135deg, #fdeee0, #fff8ea);border-color:#f0d9a0;">
+        <div class="num">🏆 ${server.lastAutoWin.count}</div>
+        <div class="cap">Total plays at last win — ${escapeAttr(playerNameFor(server.lastAutoWin.player) || 'unknown player')} at ${fmtTime(server.lastAutoWin.time)}</div>
+      </div>
+    </div>` : ''}
+
+    <div class="actions">
+      <button class="ghost" data-key="${key}" data-action="notifperm">Enable browser notifications</button>
+    </div>
+
+    <details open>
+      <summary>Step history (${history.length})</summary>
+      <div class="history">
+        ${history.length === 0 ? '<div class="hist-empty">No entries yet — plays will appear here as they happen.</div>' :
+          `<table class="step-table">
+            <thead><tr><th class="step-num">Step</th><th>Played by</th><th>Play time</th></tr></thead>
+            <tbody>
+            ${history.slice().reverse().slice(0,80).map(h => `
+              <tr class="${h.isWin ? 'win' : ''}">
+                <td class="step-num">${h.step}: ${h.isWin ? '<span class="trophy">🏆</span>' : '<span class="lose-x">✕</span>'}</td>
+                <td>${h.player ? `<span class="player-link">${escapeAttr(playerNameFor(h.player))}</span>` : '<span style="color:var(--muted);font-style:italic;">unknown</span>'}</td>
+                <td><span class="time-link">${fmtTime(h.t)}</span></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>`}
+      </div>
+    </details>
+    `}
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Event wiring
+// ---------------------------------------------------------------------------
+document.getElementById('addBtn').addEventListener('click', () => {
+  drafts.unshift({id: uid(), name: '', machineId: '', prizeId: '', gameLink: ''});
+  render();
 });
 
-document.getElementById('machines').addEventListener('input', async (e) => {
-  const id = e.target.dataset.id, field = e.target.dataset.field;
-  if(!id || !field) return;
-  const m = machines.find(x => x.id === id);
-  if(!m) return;
-  let urlWasParsed = false;
+document.getElementById('machines').addEventListener('input', (e) => {
+  const field = e.target.dataset.field;
+  if(!field) return;
+  const draftId = e.target.dataset.draft;
+  const key = e.target.dataset.key;
+
+  if(draftId){
+    const d = drafts.find(x => x.id === draftId);
+    if(!d) return;
+    d[field] = e.target.value;
+    if(field === 'gameLink'){
+      const m = e.target.value.match(/(?:https?:\/\/)?(?:www\.)?tokyocatch\.com\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
+      if(m){ d.machineId = m[1]; d.prizeId = m[2]; d.gameLink = `https://tokyocatch.com/game/${d.machineId}-${d.prizeId}`; }
+    }
+    if(field === 'machineId' || field === 'prizeId'){
+      const m = e.target.value.match(/\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
+      if(m){ d.machineId = m[1]; d.prizeId = m[2]; d.gameLink = `https://tokyocatch.com/game/${d.machineId}-${d.prizeId}`; }
+    }
+    render();
+    return;
+  }
+
+  if(!key) return;
+  const prefs = getPrefs(key);
+  const server = serverMachines.find(x => machineKey(x.machineId, x.prizeId) === key);
+
   if(field === 'alertEnabled'){
-    m.alertEnabled = e.target.checked;
-    if(m.alertEnabled) checkPlayCountAlert(m);
-    await save(); render(); return;
+    prefs.alertEnabled = e.target.checked;
+    savePrefs();
+    if(prefs.alertEnabled && server) checkPlayCountAlert(prefs, server.livePlays, prefs.name || key);
+    render(); return;
   }
   if(field === 'alertPlayTarget'){
     const v = Number(e.target.value);
-    m.alertPlayTarget = Number.isInteger(v) && v > 0 ? v : null;
-    m.alertPlayFired = false;
-    await save(); return;
+    prefs.alertPlayTarget = Number.isInteger(v) && v > 0 ? v : null;
+    prefs.alertPlayFired = false;
+    savePrefs(); return;
   }
   if(field === 'threeClawUsualRate'){
     const v = Number(e.target.value);
-    m.threeClawUsualRate = Number.isFinite(v) && v > 0 ? v : null;
-    await save(); return;
+    prefs.threeClawUsualRate = Number.isFinite(v) && v > 0 ? v : null;
+    savePrefs(); return;
   }
   if(field === 'threeClawLastPayoutOwed'){
     const v = Number(e.target.value);
-    m.threeClawLastPayoutOwed = Number.isFinite(v) ? v : null;
-    await save(); return;
+    prefs.threeClawLastPayoutOwed = Number.isFinite(v) ? v : null;
+    savePrefs(); return;
   }
-  if(field === 'name' || field === 'machineId' || field === 'prizeId' || field === 'pendingPlayer' || field === 'wsUrl' || field === 'gameLink'){
-    const prevMachineId = m.machineId, prevPrizeId = m.prizeId;
-    m[field] = e.target.value;
-
-    // Paste a full TokyoCatch game link and automatically extract both 24-character IDs.
+  if(field === 'name'){
+    prefs.name = e.target.value || null;
+    savePrefs(); return;
+  }
+  if((field === 'gameLink' || field === 'machineId' || field === 'prizeId') && server){
+    // Recovery path for a stale-prize warning: point this card at a
+    // different machine/prize. Since the relay identifies machines by
+    // machineId:prizeId, this means stop-tracking the old pair and
+    // start-tracking the new one, carrying this card's personal settings
+    // (name, alert, payout rate) across to the new key.
+    let newMachineId = server.machineId, newPrizeId = server.prizeId;
+    const val = e.target.value;
     if(field === 'gameLink'){
-      const urlMatch = e.target.value.match(/(?:https?:\/\/)?(?:www\.)?tokyocatch\.com\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
-      if(urlMatch){
-        m.machineId = urlMatch[1];
-        m.prizeId = urlMatch[2];
-        m.gameLink = `https://tokyocatch.com/game/${m.machineId}-${m.prizeId}`;
-        urlWasParsed = true;
+      const m = val.match(/(?:https?:\/\/)?(?:www\.)?tokyocatch\.com\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
+      if(m){ newMachineId = m[1]; newPrizeId = m[2]; }
+    } else if(field === 'machineId'){
+      const m = val.match(/\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
+      newMachineId = m ? m[1] : val;
+      if(m) newPrizeId = m[2];
+    } else if(field === 'prizeId'){
+      const m = val.match(/\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
+      newPrizeId = m ? m[2] : val;
+      if(m) newMachineId = m[1];
+    }
+    if(HEX24.test(newMachineId) && HEX24.test(newPrizeId)){
+      const newKey = machineKey(newMachineId, newPrizeId);
+      if(newKey !== key){
+        localPrefs[newKey] = prefs;
+        delete localPrefs[key];
+        savePrefs();
+        sendToRelay({type:'stopTracking', data:{machineId: server.machineId, prizeId: server.prizeId}});
+        sendToRelay({type:'startTracking', data:{machineId: newMachineId, prizeId: newPrizeId}});
       }
     }
-
-    // Also allow a full TokyoCatch game link to be pasted into either ID field.
-    if(field === 'machineId' || field === 'prizeId'){
-      const urlMatch = e.target.value.match(/\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
-      if(urlMatch){
-        m.machineId = urlMatch[1];
-        m.prizeId = urlMatch[2];
-        m.gameLink = `https://tokyocatch.com/game/${m.machineId}-${m.prizeId}`;
-        urlWasParsed = true;
-      }
-    }
-
-    // Keep the generated game link in sync when IDs are edited manually.
-    if((field === 'machineId' || field === 'prizeId') && m.machineId && m.prizeId){
-      m.gameLink = `https://tokyocatch.com/game/${m.machineId}-${m.prizeId}`;
-    }
-
-    // Only treat the IDs as "actually changed" once both look like complete,
-    // valid 24-char hex IDs — this avoids reconnecting on every keystroke while
-    // someone is midway through typing or pasting a replacement ID.
-    const hex24 = /^[0-9a-f]{24}$/i;
-    const idsNowComplete = hex24.test(m.machineId || '') && hex24.test(m.prizeId || '');
-    const idsChanged = m.machineId !== prevMachineId || m.prizeId !== prevPrizeId;
-    if((field === 'gameLink' || field === 'machineId' || field === 'prizeId') && idsNowComplete && idsChanged){
-      // Editing the prize/machine link means we're pointing at a (presumably)
-      // corrected prize — clear any stale-prize warning so tracking can resume,
-      // and re-subscribe so the socket stops talking about the old prize.
-      m.prizeStale = false;
-      if(m.live) connectSocket(m.id);
-    }
-  } else {
-    const v = e.target.value === '' ? null : Number(e.target.value);
-    m[field] = v;
   }
-  await save();
-  if(field === 'wsUrl' && m.live) connectSocket(m.id);
-  if(urlWasParsed) render();
-  else if((field === 'machineId' || field === 'prizeId') && m.machineId && m.prizeId) render();
 });
 
-document.getElementById('machines').addEventListener('click', async (e) => {
-  const action = e.target.dataset.action, id = e.target.dataset.id;
-  if(!action || !id) return;
-  const m = machines.find(x => x.id === id);
-  if(!m) return;
+document.getElementById('machines').addEventListener('click', (e) => {
+  const action = e.target.dataset.action;
+  if(!action) return;
+  const draftId = e.target.dataset.draft;
+  const key = e.target.dataset.key;
 
-  if(action === 'set-alert'){
-    const input = document.querySelector(`input[data-id="${id}"][data-field="alertPlayTarget"]`);
-    const v = Number(input && input.value);
-    if(!Number.isInteger(v) || v < 1){ alert('Enter a whole play number greater than 0.'); return; }
-    m.alertPlayTarget = v; m.alertPlayFired = false;
-    await save(); checkPlayCountAlert(m); render(); return;
-  }
-  if(action === 'test-alert'){ playCountAlert(m); return; }
-  if(action === 'clear-alert'){
-    m.alertPlayTarget = null; m.alertPlayFired = false;
-    await save(); render(); return;
-  }
-  if(action === 'remove'){ disconnectSocket(id); machines = machines.filter(x => x.id !== id); await save(); render(); return; }
-  if(action === 'toggle-collapse'){ m.collapsed = !m.collapsed; await save(); render(); return; }
-  if(action === 'toggle-alert-section'){ m.alertSectionCollapsed = !m.alertSectionCollapsed; await save(); render(); return; }
-  if(action === 'toggle-payout-section'){ m.payoutSectionCollapsed = !m.payoutSectionCollapsed; await save(); render(); return; }
-  if(action === 'open-tokyocatch'){ openPopup(tokyoCatchUrl(m)); return; }
-  if(action === 'open-toreba'){ openPopup(torebaPlusUrl(m)); return; }
-  if(action === 'toggle-live'){
-    m.live = !m.live;
-    if(m.live) connectSocket(id); else disconnectSocket(id);
-    await save(); render(); return;
-  }
-  if(action === 'notifperm'){ if(window.Notification && Notification.permission !== 'granted') Notification.requestPermission(); return; }
-  if(action === 'compute-payout'){
-    const rate = Number(m.threeClawUsualRate);
-    const lastOwed = Number(m.threeClawLastPayoutOwed);
-    if(!Number.isFinite(rate) || rate <= 0){ alert('Enter a valid Usual Payout rate first.'); return; }
-    if(!Number.isFinite(lastOwed)){ alert('Enter a valid Last Payout owed value first.'); return; }
-    m.threeClawPayout = rate + lastOwed;
-    await save(); render(); return;
-  }
-  if(action === 'reset-payout'){
-    m.threeClawPayout = null;
-    await save(); render(); return;
-  }
-  if(action === 'resetwin'){
-    const winPlayer = m.pendingPlayer || '';
-    m.history.push({ t: new Date().toISOString(), step: m.livePlays, sinceWin: 0, player: winPlayer, isWin: true });
-    m.lastAutoWin = { count: m.livePlays, player: winPlayer, time: new Date().toISOString() };
-    if(Number.isFinite(m.threeClawUsualRate)){
-      const priorPayout = Number.isFinite(m.threeClawPayout) ? m.threeClawPayout : m.threeClawUsualRate;
-      m.threeClawLastPayoutOwed = priorPayout - m.livePlays;
-      m.threeClawPayout = m.threeClawUsualRate + m.threeClawLastPayoutOwed; // auto-compute right away, no click needed
-    }
-    m.livePlays = 0; m.pendingPlayer = '';
-    m.alertPlayFired = false; // a new session is starting — re-arm the play-count alert for it
-    await save(); render(); return;
-  }
-  if(action === 'clearhistory'){
-    if(confirm(`Clear all ${m.history.length} history entries for "${m.name}"? This can't be undone.`)){
-      m.history = [];
-      await save(); render();
+  if(draftId){
+    const d = drafts.find(x => x.id === draftId);
+    if(!d) return;
+    if(action === 'remove-draft'){ drafts = drafts.filter(x => x.id !== draftId); render(); return; }
+    if(action === 'connect-live'){
+      if(!HEX24.test(d.machineId || '') || !HEX24.test(d.prizeId || '')){
+        alert('Enter a valid TokyoCatch prize link, or both 24-character IDs, first.');
+        return;
+      }
+      const key2 = machineKey(d.machineId, d.prizeId);
+      if(d.name) getPrefs(key2).name = d.name;
+      savePrefs();
+      sendToRelay({type:'startTracking', data:{machineId: d.machineId, prizeId: d.prizeId}});
+      drafts = drafts.filter(x => x.id !== draftId);
+      render();
+      return;
     }
     return;
   }
+
+  if(!key) return;
+  const prefs = getPrefs(key);
+  const server = serverMachines.find(x => machineKey(x.machineId, x.prizeId) === key);
+  if(!server) return;
+  const displayName = prefs.name || server.prizeTitleEn || server.prizeTitleJa || key;
+
+  if(action === 'set-alert'){
+    const input = document.querySelector(`input[data-key="${key}"][data-field="alertPlayTarget"]`);
+    const v = Number(input && input.value);
+    if(!Number.isInteger(v) || v < 1){ alert('Enter a whole play number greater than 0.'); return; }
+    prefs.alertPlayTarget = v; prefs.alertPlayFired = false;
+    savePrefs(); checkPlayCountAlert(prefs, server.livePlays, displayName); render(); return;
+  }
+  if(action === 'test-alert'){ playCountAlert(displayName, server.livePlays); return; }
+  if(action === 'clear-alert'){ prefs.alertPlayTarget = null; prefs.alertPlayFired = false; savePrefs(); render(); return; }
+  if(action === 'remove'){
+    if(!confirm(`Stop tracking "${displayName}"? This is shared — it will stop counting for everyone watching this dashboard, not just you.`)) return;
+    sendToRelay({type:'stopTracking', data:{machineId: server.machineId, prizeId: server.prizeId}});
+    delete localPrefs[key]; savePrefs();
+    return;
+  }
+  if(action === 'toggle-collapse'){ prefs.collapsed = !prefs.collapsed; savePrefs(); render(); return; }
+  if(action === 'toggle-alert-section'){ prefs.alertSectionCollapsed = !prefs.alertSectionCollapsed; savePrefs(); render(); return; }
+  if(action === 'toggle-payout-section'){ prefs.payoutSectionCollapsed = !prefs.payoutSectionCollapsed; savePrefs(); render(); return; }
+  if(action === 'open-tokyocatch'){ openPopup(tokyoCatchUrl(server)); return; }
+  if(action === 'open-toreba'){ openPopup(torebaPlusUrl(server)); return; }
+  if(action === 'notifperm'){ if(window.Notification && Notification.permission !== 'granted') Notification.requestPermission(); return; }
+  if(action === 'compute-payout'){
+    const rate = Number(prefs.threeClawUsualRate);
+    const lastOwed = Number(prefs.threeClawLastPayoutOwed);
+    if(!Number.isFinite(rate) || rate <= 0){ alert('Enter a valid Usual Payout rate first.'); return; }
+    if(!Number.isFinite(lastOwed)){ alert('Enter a valid Last Payout owed value first.'); return; }
+    prefs.threeClawPayout = rate + lastOwed;
+    savePrefs(); render(); return;
+  }
+  if(action === 'reset-payout'){ prefs.threeClawPayout = null; savePrefs(); render(); return; }
 });
 
 document.getElementById('retrievePlayersBtn').addEventListener('click', () => {
@@ -868,9 +797,9 @@ document.getElementById('playersCsvInput').addEventListener('change', async e =>
 updatePlayerListStatus();
 
 // Chrome/Safari block audio that isn't triggered by a direct user gesture.
-// Since the play-count and win alerts fire from WebSocket messages (not clicks),
-// the very first automatic alert can get silently blocked. One click or keypress
-// anywhere on the page unlocks audio for the rest of the session.
+// Since alerts fire from WebSocket messages (not clicks), the very first
+// automatic alert can get silently blocked. One click or keypress anywhere
+// on the page unlocks audio for the rest of the session.
 let audioUnlocked = false;
 function unlockAudioOnce(){
   if(audioUnlocked) return;
@@ -883,7 +812,9 @@ function unlockAudioOnce(){
 document.addEventListener('click', unlockAudioOnce, {once:true});
 document.addEventListener('keydown', unlockAudioOnce, {once:true});
 
-load();
+loaded = true;
+render();
+connectRelay();
 </script>
 </body>
 </html>
