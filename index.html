@@ -137,7 +137,8 @@
   <div class="player-list-bar">
     <button class="ghost" id="retrievePlayersBtn" type="button">Retrieve player list</button>
     <input id="playersCsvInput" type="file" accept=".csv,text/csv" hidden>
-    <span class="player-list-status" id="playerListStatus">No CSV loaded yet. Choose players.csv when ready.</span>
+    <span class="player-list-status" id="playerListStatus">No player list loaded yet.</span>
+    <button class="icon-btn" id="uploadPlayersManualBtn" type="button" title="Only needed if players.csv isn't hosted here">Upload manually instead</button>
   </div>
 
   <button class="add-machine" id="addBtn">+ Add a machine to track</button>
@@ -172,9 +173,36 @@ function parsePlayerCsv(text){
   row.push(cell); if(row.some(v=>v.trim())) rows.push(row);
   return rows;
 }
+let playerListSource = null; // 'players.csv' (auto-fetched) or 'a manually uploaded file' — for the status line only
 function updatePlayerListStatus(){
   const el=document.getElementById('playerListStatus');
-  if(el) el.textContent=Object.keys(playerList).length ? `${Object.keys(playerList).length} players loaded.` : 'No CSV loaded yet. Choose players.csv when ready.';
+  if(!el) return;
+  const n = Object.keys(playerList).length;
+  el.textContent = n
+    ? `${n} players loaded${playerListSource ? ` (${playerListSource})` : ''}.`
+    : 'No player list loaded yet.';
+}
+// Shared by both the auto-fetch and manual-upload paths: parses CSV text,
+// validates it has usable playerID/playerName rows, and — only if valid —
+// replaces the stored player list and persists it locally. Throws on
+// anything invalid so callers can show their own error message.
+function applyPlayerCsvText(text, sourceLabel){
+  const rows=parsePlayerCsv(text);
+  if(!rows.length) throw new Error('The file is empty.');
+  let start=0;
+  const first=(rows[0][0] || '').replace(/^\ufeff/,'').trim().toLowerCase();
+  if(first==='playerid' || first==='player id') start=1;
+  const next={};
+  for(let i=start;i<rows.length;i++){
+    const id=(rows[i][0] || '').trim();
+    const name=(rows[i][1] || '').trim();
+    if(id && name) next[id]=name;
+  }
+  if(!Object.keys(next).length) throw new Error('No valid playerID, playerName rows were found.');
+  playerList=next;
+  playerListSource = sourceLabel;
+  localStorage.setItem(PLAYER_LIST_KEY, JSON.stringify(playerList));
+  updatePlayerListStatus();
 }
 
 // ---------------------------------------------------------------------------
@@ -884,30 +912,42 @@ document.getElementById('machines').addEventListener('click', (e) => {
   }
 });
 
-document.getElementById('retrievePlayersBtn').addEventListener('click', () => {
+// Primary path: fetch players.csv from this same site (it's a static site,
+// so a players.csv file committed into the site's own GitHub repo, right
+// alongside index.html, is served at this same relative URL automatically
+// — no per-person file needed, and everyone always gets whatever the repo
+// currently has).
+document.getElementById('retrievePlayersBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('retrievePlayersBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Retrieving…';
+  try{
+    const res = await fetch('players.csv', {cache: 'no-store'});
+    if(!res.ok) throw new Error(`players.csv not found on this site (HTTP ${res.status}). Ask whoever maintains the dashboard to add one to the GitHub repo, or use "Upload manually instead".`);
+    applyPlayerCsvText(await res.text(), 'from players.csv on this site');
+    render();
+  }catch(err){
+    alert('Could not retrieve the shared player list: ' + err.message);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+});
+
+// Fallback path: same as before — pick a local CSV file by hand. Mainly
+// useful for testing a list before committing it, or if the shared file
+// genuinely isn't set up yet.
+document.getElementById('uploadPlayersManualBtn').addEventListener('click', () => {
   document.getElementById('playersCsvInput').click();
 });
 document.getElementById('playersCsvInput').addEventListener('change', async e => {
   const file=e.target.files && e.target.files[0];
   if(!file) return;
   try{
-    const rows=parsePlayerCsv(await file.text());
-    if(!rows.length) throw new Error('The CSV is empty.');
-    let start=0;
-    const first=(rows[0][0] || '').replace(/^\ufeff/,'').trim().toLowerCase();
-    if(first==='playerid' || first==='player id') start=1;
-    const next={};
-    for(let i=start;i<rows.length;i++){
-      const id=(rows[i][0] || '').trim();
-      const name=(rows[i][1] || '').trim();
-      if(id && name) next[id]=name;
-    }
-    if(!Object.keys(next).length) throw new Error('No valid playerID, playerName rows were found.');
-    playerList=next;
-    localStorage.setItem(PLAYER_LIST_KEY, JSON.stringify(playerList));
-    updatePlayerListStatus();
+    applyPlayerCsvText(await file.text(), 'from a manually uploaded file');
     render();
-  }catch(err){ alert('Could not retrieve player list: '+err.message); }
+  }catch(err){ alert('Could not load that file: '+err.message); }
   finally{ e.target.value=''; }
 });
 updatePlayerListStatus();
