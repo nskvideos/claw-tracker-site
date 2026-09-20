@@ -115,6 +115,14 @@
 
   .player-list-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:12px 0;}
   .player-list-status{font-size:.82rem;color:var(--muted);}
+
+  .category-header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:30px 0 12px;}
+  .category-header:first-child{margin-top:6px;}
+  .category-header h2{font-size:1.15rem;margin:0;letter-spacing:-0.005em;}
+  .category-summary{font-size:0.85rem;color:var(--muted);font-style:italic;margin:0 0 16px;}
+  .category-row{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
+  .category-row label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);white-space:nowrap;}
+  .category-row input{flex:1;border:1px solid var(--line);background:white;border-radius:6px;padding:6px 9px;font-size:0.85rem;font-family:inherit;}
 </style>
 </head>
 <body>
@@ -190,6 +198,50 @@ let drafts = [];           // machines being added, not yet tracked by the relay
 
 try{ localPrefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}; }catch(e){ localPrefs = {}; }
 
+// ---------------------------------------------------------------------------
+// Categories — grouped by the prize title's prefix (e.g. "Figure - ..." ->
+// "Figures"), which is shared relay data, so every browser derives the same
+// grouping for free with no relay changes needed for the common case. An
+// explicit override (the `category` field the relay broadcasts) takes
+// precedence when someone sets one — that IS shared/relay-owned, so a
+// manual override is visible to everyone watching, not just the browser
+// that set it. Which categories are collapsed/expanded, though, is purely a
+// personal display preference and stays local per browser.
+const CATEGORY_PREFS_KEY = 'tc_category_prefs_v1';
+let categoryPrefs = {};
+try{ categoryPrefs = JSON.parse(localStorage.getItem(CATEGORY_PREFS_KEY) || '{}') || {}; }catch(e){ categoryPrefs = {}; }
+function getCategoryPrefs(cat){
+  if(!categoryPrefs[cat]) categoryPrefs[cat] = {collapsed: false};
+  return categoryPrefs[cat];
+}
+function saveCategoryPrefs(){
+  try{ localStorage.setItem(CATEGORY_PREFS_KEY, JSON.stringify(categoryPrefs)); }catch(e){ console.error('Storage error', e); }
+}
+function deriveCategory(prizeTitleEn){
+  const prefix = (prizeTitleEn || '').split(' - ')[0].trim();
+  if(!prefix) return 'Others';
+  // Naive but good-enough pluralization for prize-title prefixes like
+  // "Figure", "Light", "Plushie" — not meant to be linguistically perfect.
+  if(/s$/i.test(prefix)) return prefix;
+  if(/[^aeiou]y$/i.test(prefix)) return prefix.slice(0, -1) + 'ies';
+  return prefix + 's';
+}
+function categoryFor(server){
+  return server.category || deriveCategory(server.prizeTitleEn) || 'Others';
+}
+function groupMachinesByCategory(list){
+  const groups = new Map();
+  list.forEach(server => {
+    const cat = categoryFor(server);
+    if(!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(server);
+  });
+  // Stable order (first-seen), but "Others" always sorts last.
+  return Array.from(groups.entries())
+    .map(([category, machines]) => ({category, machines}))
+    .sort((a, b) => (a.category === 'Others') - (b.category === 'Others'));
+}
+
 function machineKey(machineId, prizeId){ return `${machineId}:${prizeId}`; }
 function uid(){ return 'm_' + Math.random().toString(36).slice(2, 10); }
 
@@ -199,9 +251,7 @@ function defaultPrefs(){
     alertEnabled: false,
     alertPlayTarget: null,
     alertPlayFired: false,
-    threeClawUsualRate: 28,
-    threeClawLastPayoutOwed: null,
-    threeClawPayout: null,
+
     collapsed: false,
     alertSectionCollapsed: false,
     payoutSectionCollapsed: false,
@@ -339,11 +389,9 @@ function handleIncomingMachineUpdate(prev, next, key){
   if(nextWinTime && nextWinTime !== prevWinTime){
     beep();
     notify(`${name}: win detected!`, `Won after ${next.lastAutoWin.count} play${next.lastAutoWin.count === 1 ? '' : 's'} — ${playerNameFor(next.lastAutoWin.player) || 'unknown player'}.`);
-    if(Number.isFinite(prefs.threeClawUsualRate)){
-      const priorPayout = Number.isFinite(prefs.threeClawPayout) ? prefs.threeClawPayout : prefs.threeClawUsualRate;
-      prefs.threeClawLastPayoutOwed = priorPayout - next.lastAutoWin.count;
-      prefs.threeClawPayout = prefs.threeClawUsualRate + prefs.threeClawLastPayoutOwed;
-    }
+    // THREE_CLAW payout math is computed by the relay now (shared —
+    // next.threeClawPayout/threeClawLastPayoutOwed arrive already updated
+    // in this same broadcast), not here.
     prefs.alertPlayFired = false; // a new session is starting — re-arm the play-count alert for it
     savePrefs();
   }
@@ -385,10 +433,13 @@ function render(){
   if(!loaded){ root.innerHTML = '<div class="loading">Connecting to relay…</div>'; return; }
 
   if(drafts.length === 0 && serverMachines.length === 0){
-    root.innerHTML = '<div class="empty-state">No machines yet. Add one to start tracking.</div>';
+    root.innerHTML = '<div class="empty-state">No machines yet. Add one below to start tracking.</div>';
     return;
   }
 
+  // Drafts (not yet sent to the relay) render ungrouped, above every
+  // category, since they don't have relay-confirmed prize data to derive a
+  // category from yet.
   drafts.forEach(d => {
     const card = document.createElement('div');
     card.className = 'machine';
@@ -396,14 +447,40 @@ function render(){
     root.appendChild(card);
   });
 
-  serverMachines.forEach(server => {
+  groupMachinesByCategory(serverMachines).forEach(({category, machines}) => {
+    const section = document.createElement('div');
+    section.innerHTML = renderCategorySection(category, machines);
+    root.appendChild(section);
+  });
+}
+
+function renderCategorySection(category, machines){
+  const catPrefs = getCategoryPrefs(category);
+  const escCat = escapeAttr(category);
+  const count = machines.length;
+
+  if(catPrefs.collapsed){
+    return `
+      <div class="category-header">
+        <h2>${escCat}</h2>
+        <button class="icon-btn" data-action="toggle-category" data-category="${escCat}">Expand ▾</button>
+      </div>
+      <div class="category-summary">currently tracking ${count} item${count === 1 ? '' : 's'}</div>
+    `;
+  }
+
+  let html = `
+    <div class="category-header">
+      <h2>${escCat}</h2>
+      <button class="icon-btn" data-action="toggle-category" data-category="${escCat}">Collapse ▲</button>
+    </div>
+  `;
+  machines.forEach(server => {
     const key = machineKey(server.machineId, server.prizeId);
     const prefs = getPrefs(key);
-    const card = document.createElement('div');
-    card.className = 'machine' + (server.prizeStale ? ' alerting' : '');
-    card.innerHTML = renderTrackedCard(server, prefs, key);
-    root.appendChild(card);
+    html += `<div class="machine${server.prizeStale ? ' alerting' : ''}">${renderTrackedCard(server, prefs, key)}</div>`;
   });
+  return html;
 }
 
 function renderDraftCard(d){
@@ -454,8 +531,14 @@ function renderTrackedCard(server, prefs, key){
     <div class="machine-summary">
       <span>Plays <b>${server.livePlays}</b></span>
       <span>Alert at <b>${prefs.alertEnabled && prefs.alertPlayTarget ? prefs.alertPlayTarget : '—'}</b></span>
+      ${server.machineType === 'THREE_CLAW' && server.threeClawPayout != null ? `<span>Payout at <b>${server.threeClawPayout}</b></span>` : ''}
     </div>
     ` : `
+    <div class="category-row">
+      <label>Category</label>
+      <input type="text" value="${escapeAttr(server.category || '')}" placeholder="${escapeAttr(deriveCategory(server.prizeTitleEn))} (auto, from prize title)" data-key="${key}" data-field="category" />
+    </div>
+    <div class="link-hint" style="margin-top:-8px;margin-bottom:14px;">Shared — moves this card for everyone watching. Leave blank to auto-detect from the prize title.</div>
     ${server.prizeStale ? `
     <div class="play-alert" style="background:#fdeceb;border-color:#e2a89a;">
       <div class="play-alert-title" style="color:#8a2c1c;">⚠️ Prize no longer on this machine</div>
@@ -508,27 +591,27 @@ function renderTrackedCard(server, prefs, key){
       </div>
       ${prefs.payoutSectionCollapsed ? `
       <div class="play-alert-status" style="margin-top:0;">
-        Minimized — still running in the background. Payout: <b>${prefs.threeClawPayout != null ? prefs.threeClawPayout : '—'}</b>
+        Minimized — still running in the background. Payout: <b>${server.threeClawPayout != null ? server.threeClawPayout : '—'}</b>
       </div>
       ` : `
       <div class="play-alert-row">
         <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
           Usual Payout rate
-          <input type="number" min="1" step="1" value="${prefs.threeClawUsualRate != null ? prefs.threeClawUsualRate : ''}" data-key="${key}" data-field="threeClawUsualRate" style="width:120px;" />
+          <input type="number" min="1" step="1" placeholder="28" value="${server.threeClawUsualRate != null ? server.threeClawUsualRate : ''}" data-key="${key}" data-field="threeClawUsualRate" style="width:120px;" />
         </label>
         <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
           Last Payout owed
-          <input type="number" step="1" value="${prefs.threeClawLastPayoutOwed != null ? prefs.threeClawLastPayoutOwed : ''}" data-key="${key}" data-field="threeClawLastPayoutOwed" style="width:120px;" />
+          <input type="number" step="1" value="${server.threeClawLastPayoutOwed != null ? server.threeClawLastPayoutOwed : ''}" data-key="${key}" data-field="threeClawLastPayoutOwed" style="width:120px;" />
         </label>
         <label style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;color:var(--muted);">
           Payout
-          <div style="font-weight:800;font-size:1.1rem;padding:6px 0;">${prefs.threeClawPayout != null ? prefs.threeClawPayout : '—'}</div>
+          <div style="font-weight:800;font-size:1.1rem;padding:6px 0;">${server.threeClawPayout != null ? server.threeClawPayout : '—'}</div>
         </label>
         <button class="ghost" data-key="${key}" data-action="compute-payout">Compute</button>
         <button class="ghost" data-key="${key}" data-action="reset-payout">Reset to usual rate</button>
       </div>
       <div class="play-alert-status">
-        On a win, "Last Payout owed" and "Payout" both update automatically on this browser — measured against whatever Payout was predicted going into that round (or Usual rate if there's no history yet), not the fixed rate. A negative number means the win came later than predicted. This rate is personal to this browser, not shared.
+        On a win, "Last Payout owed" and "Payout" both update automatically for everyone — measured against whatever Payout was predicted going into that round (or Usual rate if there's no history yet), not the fixed rate. A negative number means the win came later than predicted. <b>This whole tracker is shared</b> — once anyone sets the Usual Payout rate, everyone watching sees the same numbers with nothing else to set up.
       </div>
       `}
     </div>` : ''}
@@ -657,16 +740,6 @@ document.getElementById('machines').addEventListener('input', (e) => {
     prefs.alertPlayFired = false;
     savePrefs(); return;
   }
-  if(field === 'threeClawUsualRate'){
-    const v = Number(e.target.value);
-    prefs.threeClawUsualRate = Number.isFinite(v) && v > 0 ? v : null;
-    savePrefs(); return;
-  }
-  if(field === 'threeClawLastPayoutOwed'){
-    const v = Number(e.target.value);
-    prefs.threeClawLastPayoutOwed = Number.isFinite(v) ? v : null;
-    savePrefs(); return;
-  }
   if(field === 'name'){
     prefs.name = e.target.value || null;
     savePrefs(); return;
@@ -704,9 +777,49 @@ document.getElementById('machines').addEventListener('input', (e) => {
   }
 });
 
+// Separate from the 'input' listener above (which fires on every
+// keystroke): these fields are shared, so they only send to the relay on
+// 'change' (i.e. on blur/Enter) — no reason to spam the relay with an
+// update while someone is still mid-typing.
+document.getElementById('machines').addEventListener('change', (e) => {
+  const field = e.target.dataset.field;
+  const key = e.target.dataset.key;
+  if(!key) return;
+  const server = serverMachines.find(x => machineKey(x.machineId, x.prizeId) === key);
+  if(!server) return;
+
+  if(field === 'category'){
+    const val = e.target.value.trim();
+    sendToRelay({type:'setCategory', data:{machineId: server.machineId, prizeId: server.prizeId, category: val || null}});
+    return;
+  }
+  if(field === 'threeClawUsualRate'){
+    const v = Number(e.target.value);
+    const rate = Number.isFinite(v) && v > 0 ? v : null;
+    sendToRelay({type:'payoutAction', data:{machineId: server.machineId, prizeId: server.prizeId, action:'setRate', value: rate}});
+    return;
+  }
+  if(field === 'threeClawLastPayoutOwed'){
+    const v = Number(e.target.value);
+    const owed = Number.isFinite(v) ? v : null;
+    sendToRelay({type:'payoutAction', data:{machineId: server.machineId, prizeId: server.prizeId, action:'setOwed', value: owed}});
+    return;
+  }
+});
+
 document.getElementById('machines').addEventListener('click', (e) => {
   const action = e.target.dataset.action;
   if(!action) return;
+
+  if(action === 'toggle-category'){
+    const cat = e.target.dataset.category;
+    const cp = getCategoryPrefs(cat);
+    cp.collapsed = !cp.collapsed;
+    saveCategoryPrefs();
+    render();
+    return;
+  }
+
   const draftId = e.target.dataset.draft;
   const key = e.target.dataset.key;
 
@@ -758,14 +871,17 @@ document.getElementById('machines').addEventListener('click', (e) => {
   if(action === 'open-toreba'){ openPopup(torebaPlusUrl(server)); return; }
   if(action === 'notifperm'){ if(window.Notification && Notification.permission !== 'granted') Notification.requestPermission(); return; }
   if(action === 'compute-payout'){
-    const rate = Number(prefs.threeClawUsualRate);
-    const lastOwed = Number(prefs.threeClawLastPayoutOwed);
+    const rate = Number(server.threeClawUsualRate);
+    const lastOwed = Number(server.threeClawLastPayoutOwed);
     if(!Number.isFinite(rate) || rate <= 0){ alert('Enter a valid Usual Payout rate first.'); return; }
     if(!Number.isFinite(lastOwed)){ alert('Enter a valid Last Payout owed value first.'); return; }
-    prefs.threeClawPayout = rate + lastOwed;
-    savePrefs(); render(); return;
+    sendToRelay({type:'payoutAction', data:{machineId: server.machineId, prizeId: server.prizeId, action:'compute'}});
+    return;
   }
-  if(action === 'reset-payout'){ prefs.threeClawPayout = null; savePrefs(); render(); return; }
+  if(action === 'reset-payout'){
+    sendToRelay({type:'payoutAction', data:{machineId: server.machineId, prizeId: server.prizeId, action:'reset'}});
+    return;
+  }
 });
 
 document.getElementById('retrievePlayersBtn').addEventListener('click', () => {
