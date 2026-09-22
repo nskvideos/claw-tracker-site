@@ -453,12 +453,20 @@ function handleIncomingMachineUpdate(prev, next, key){
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+function notificationStatusLabel(){
+  if(!window.Notification) return 'Desktop notifications: not supported by this browser';
+  if(Notification.permission === 'granted') return 'Desktop notifications: enabled ✓';
+  if(Notification.permission === 'denied') return 'Desktop notifications: blocked — check the padlock icon next to the address bar, or your OS notification settings for this browser';
+  return 'Desktop notifications: not yet enabled — click "Enable browser notifications" on any card';
+}
+
 function updateGlobalBar(){
   const bar = document.getElementById('globalBar');
   if(!loaded){ bar.innerHTML = ''; return; }
   bar.innerHTML = `
     <div><span class="status-dot ${socketStatus.ok ? 'live' : ''}"></span>${escapeAttr(socketStatus.msg)}</div>
     <div>${serverMachines.length} machine${serverMachines.length === 1 ? '' : 's'} tracked — shared with everyone watching this dashboard</div>
+    <div>${escapeAttr(notificationStatusLabel())}</div>
   `;
 }
 
@@ -920,7 +928,12 @@ document.getElementById('machines').addEventListener('click', (e) => {
   if(action === 'toggle-payout-section'){ prefs.payoutSectionCollapsed = !prefs.payoutSectionCollapsed; savePrefs(); render(); return; }
   if(action === 'open-tokyocatch'){ openPopup(tokyoCatchUrl(server)); return; }
   if(action === 'open-toreba'){ openPopup(torebaPlusUrl(server)); return; }
-  if(action === 'notifperm'){ if(window.Notification && Notification.permission !== 'granted') Notification.requestPermission(); return; }
+  if(action === 'notifperm'){
+    if(window.Notification && Notification.permission !== 'granted'){
+      Notification.requestPermission().then(() => render());
+    }
+    return;
+  }
   if(action === 'compute-payout'){
     const rate = Number(server.threeClawUsualRate);
     const lastOwed = Number(server.threeClawLastPayoutOwed);
