@@ -129,7 +129,10 @@
   .category-header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:30px 0 12px;}
   .category-header:first-child{margin-top:6px;}
   .category-header h2{font-size:1.15rem;margin:0;letter-spacing:-0.005em;}
-  .category-extras{color:var(--ink);font-style:normal;}
+  .category-summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px;}
+  .cat-badge{font-style:normal;font-size:0.72rem;font-weight:600;padding:2px 9px;border-radius:999px;white-space:nowrap;}
+  .cat-badge.last-chance{background:#fbecc8;color:#8a5a00;}
+  .cat-badge.irrelevant{background:rgba(184,50,31,0.1);color:var(--alert);}
   .category-summary{font-size:0.85rem;color:var(--muted);font-style:italic;margin:0 0 16px;}
   .category-row{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
   .category-row label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);white-space:nowrap;}
@@ -566,10 +569,9 @@ function renderCategorySection(category, machines){
   const allPrizes = machines.flatMap(c => c.prizes);
   const staleCount = allPrizes.filter(p => p.prizeStale).length;
   const lastChanceCount = allPrizes.filter(p => p.prizeLabel === 'LAST_CHANCE').length;
-  const extras = [];
-  if(staleCount) extras.push(`${staleCount} irrelevant prize${staleCount === 1 ? '' : 's'}`);
-  if(lastChanceCount) extras.push(`${lastChanceCount} prize${lastChanceCount === 1 ? '' : 's'} last chance`);
-  const extraHtml = extras.length ? ` <span class="category-extras">, ${extras.join(', ')}</span>` : '';
+  const extraHtml =
+    (lastChanceCount ? `<span class="cat-badge last-chance">${lastChanceCount} last chance</span>` : '') +
+    (staleCount ? `<span class="cat-badge irrelevant">${staleCount} irrelevant</span>` : '');
 
   if(catPrefs.collapsed){
     return `
@@ -577,7 +579,7 @@ function renderCategorySection(category, machines){
         <h2>${escCat}</h2>
         <button class="icon-btn" data-action="toggle-category" data-category="${escCat}">Expand ▾</button>
       </div>
-      <div class="category-summary">currently tracking ${count} item${count === 1 ? '' : 's'}${extraHtml}</div>
+      <div class="category-summary"><span>currently tracking ${count} item${count === 1 ? '' : 's'}</span>${extraHtml}</div>
     `;
   }
 
