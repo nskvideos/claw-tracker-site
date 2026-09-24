@@ -587,6 +587,10 @@ function renderCategorySection(category, machines){
 function renderDraftCard(d){
   const idsValid = HEX24.test(d.machineId || '') && HEX24.test(d.prizeId || '');
   const sameMachine = idsValid && serverMachines.some(s => s.machineId === d.machineId);
+  const sibling = sameMachine ? buildCards().find(c => c.machineId === d.machineId) : null;
+  const catPlaceholder = sibling
+    ? `${categoryFor(sibling.selected)} (same as this machine's existing card)`
+    : 'Auto-detected from the prize title';
   return `
     <div class="machine-top">
       <input class="machine-name" value="${escapeAttr(d.name || '')}" placeholder="New machine" data-draft="${d.id}" data-field="name" />
@@ -594,6 +598,11 @@ function renderDraftCard(d){
         <button class="icon-btn" data-draft="${d.id}" data-action="remove-draft">Remove</button>
       </div>
     </div>
+    <div class="category-row">
+      <label>Category</label>
+      <input type="text" value="${escapeAttr(d.category || '')}" placeholder="${escapeAttr(catPlaceholder)}" data-draft="${d.id}" data-field="category" />
+    </div>
+    <div class="link-hint" style="margin-top:-8px;margin-bottom:14px;">Shared — moves this card for everyone watching. Leave blank to auto-detect from the prize title.</div>
     <div class="live-config">
       <label>TokyoCatch prize link</label>
       <input type="text" placeholder="Paste a TokyoCatch game link here, e.g. https://tokyocatch.com/game/686abfea206128473c01e7dd-6a8409305d57c7003f6844ea" value="${escapeAttr(d.gameLink || '')}" data-draft="${d.id}" data-field="gameLink" />
@@ -812,7 +821,7 @@ function renderTrackedCard(server, prefs, key, prizes){
 // Event wiring
 // ---------------------------------------------------------------------------
 document.getElementById('addBtn').addEventListener('click', () => {
-  drafts.unshift({id: uid(), name: '', machineId: '', prizeId: '', gameLink: ''});
+  drafts.unshift({id: uid(), name: '', machineId: '', prizeId: '', gameLink: '', category: ''});
   render();
 });
 
@@ -826,6 +835,7 @@ document.getElementById('machines').addEventListener('input', (e) => {
     const d = drafts.find(x => x.id === draftId);
     if(!d) return;
     d[field] = e.target.value;
+    if(field === 'name' || field === 'category') return;   // nothing else on the card depends on these — skip the re-render so typing keeps focus
     if(field === 'gameLink'){
       const m = e.target.value.match(/(?:https?:\/\/)?(?:www\.)?tokyocatch\.com\/game\/([0-9a-f]{24})-([0-9a-f]{24})/i);
       if(m){ d.machineId = m[1]; d.prizeId = m[2]; d.gameLink = `https://tokyocatch.com/game/${d.machineId}-${d.prizeId}`; }
@@ -962,7 +972,11 @@ document.getElementById('machines').addEventListener('click', (e) => {
       const key2 = machineKey(d.machineId, d.prizeId);
       if(d.name) getPrefs(key2).name = d.name;
       savePrefs();
-      sendToRelay({type:'startTracking', data:{machineId: d.machineId, prizeId: d.prizeId}});
+      // Blank category: if this machine already has a card with an explicit
+      // category, reuse it so the card doesn't jump to another section.
+      const siblingCat = (serverMachines.find(x => x.machineId === d.machineId && x.category) || {}).category || null;
+      const category = (d.category || '').trim() || siblingCat;
+      sendToRelay({type:'startTracking', data:{machineId: d.machineId, prizeId: d.prizeId, category}});
       getGroupPrefs(d.machineId).selectedPrizeId = d.prizeId;   // joins the machine's card and becomes the shown prize
       saveGroupPrefs();
       drafts = drafts.filter(x => x.id !== draftId);
