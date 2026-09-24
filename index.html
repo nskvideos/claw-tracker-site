@@ -49,6 +49,11 @@
   .prize-info .prize-title-ja{color:var(--muted);}
   .prize-info .prize-meta{margin-top:4px;font-size:0.78rem;color:var(--muted);}
   .prize-info .prize-meta b{color:var(--ink);}
+  .prize-info .prize-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px;}
+  .prize-info select{flex:1;min-width:0;max-width:100%;border:1px solid var(--line);background:white;border-radius:6px;padding:7px 8px;font-size:0.82rem;font-family:inherit;color:var(--ink);}
+  .prize-info .prize-actions button.ghost{padding:6px 12px;font-size:0.82rem;}
+  .prize-label{color:var(--claw-dark);}
+  .prize-label.last-chance{color:var(--alert);}
   .quick-links{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
   .quick-links button{background:white;border:1px solid var(--line);border-radius:8px;padding:7px 12px;font-size:0.8rem;color:var(--claw-dark);cursor:pointer;font-family:inherit;font-weight:600;}
   .quick-links button:hover{border-color:var(--claw);background:#fdf6ec;}
@@ -282,10 +287,10 @@ function categoryFor(server){
 }
 function groupMachinesByCategory(list){
   const groups = new Map();
-  list.forEach(server => {
-    const cat = categoryFor(server);
+  list.forEach(card => {
+    const cat = categoryFor(card.selected);   // a card sits under its selected prize's category
     if(!groups.has(cat)) groups.set(cat, []);
-    groups.get(cat).push(server);
+    groups.get(cat).push(card);
   });
   // Stable order (first-seen), but "Others" always sorts last.
   return Array.from(groups.entries())
@@ -295,6 +300,40 @@ function groupMachinesByCategory(list){
 
 function machineKey(machineId, prizeId){ return `${machineId}:${prizeId}`; }
 function uid(){ return 'm_' + Math.random().toString(36).slice(2, 10); }
+
+// ---------------------------------------------------------------------------
+// Machine groups — the relay still tracks each machineId:prizeId pair as its
+// own record (own count + history). The dashboard shows ONE card per
+// machineId, with a prize switcher over that machine's tracked prizes. Which
+// prize is selected, and whether the card is collapsed, are personal display
+// prefs keyed by machineId.
+// ---------------------------------------------------------------------------
+const GROUP_PREFS_KEY = 'tc_group_prefs_v1';
+let groupPrefs = {};
+try{ groupPrefs = JSON.parse(localStorage.getItem(GROUP_PREFS_KEY) || '{}') || {}; }catch(e){ groupPrefs = {}; }
+function saveGroupPrefs(){
+  try{ localStorage.setItem(GROUP_PREFS_KEY, JSON.stringify(groupPrefs)); }catch(e){ console.error('Storage error', e); }
+}
+function getGroupPrefs(machineId){
+  if(!groupPrefs[machineId]){
+    // one-time carry-over of the old per-prize collapsed state
+    const wasCollapsed = serverMachines.some(s => s.machineId === machineId && localPrefs[machineKey(s.machineId, s.prizeId)]?.collapsed);
+    groupPrefs[machineId] = {selectedPrizeId: null, collapsed: wasCollapsed};
+  }
+  return groupPrefs[machineId];
+}
+function buildCards(){
+  const byMachine = new Map();
+  serverMachines.forEach(s => {
+    if(!byMachine.has(s.machineId)) byMachine.set(s.machineId, []);
+    byMachine.get(s.machineId).push(s);
+  });
+  return Array.from(byMachine.entries()).map(([machineId, prizes]) => {
+    const gp = getGroupPrefs(machineId);
+    const selected = prizes.find(p => p.prizeId === gp.selectedPrizeId) || prizes[0];
+    return {machineId, prizes, selected};
+  });
+}
 
 function defaultPrefs(){
   return {
@@ -465,7 +504,7 @@ function updateGlobalBar(){
   if(!loaded){ bar.innerHTML = ''; return; }
   bar.innerHTML = `
     <div><span class="status-dot ${socketStatus.ok ? 'live' : ''}"></span>${escapeAttr(socketStatus.msg)}</div>
-    <div>${serverMachines.length} machine${serverMachines.length === 1 ? '' : 's'} tracked — shared with everyone watching this dashboard</div>
+    <div>${new Set(serverMachines.map(x => x.machineId)).size} machine${new Set(serverMachines.map(x => x.machineId)).size === 1 ? '' : 's'} (${serverMachines.length} prize${serverMachines.length === 1 ? '' : 's'}) tracked — shared with everyone watching this dashboard</div>
     <div>${escapeAttr(notificationStatusLabel())}</div>
   `;
 }
@@ -506,7 +545,7 @@ function render(){
     root.appendChild(card);
   });
 
-  groupMachinesByCategory(serverMachines).forEach(({category, machines}) => {
+  groupMachinesByCategory(buildCards()).forEach(({category, machines}) => {
     const section = document.createElement('div');
     section.innerHTML = renderCategorySection(category, machines);
     root.appendChild(section);
@@ -534,16 +573,18 @@ function renderCategorySection(category, machines){
       <button class="icon-btn" data-action="toggle-category" data-category="${escCat}">Collapse ▲</button>
     </div>
   `;
-  machines.forEach(server => {
+  machines.forEach(card => {
+    const server = card.selected;
     const key = machineKey(server.machineId, server.prizeId);
     const prefs = getPrefs(key);
-    html += `<div class="machine${server.prizeStale ? ' alerting' : ''}">${renderTrackedCard(server, prefs, key)}</div>`;
+    html += `<div class="machine${server.prizeStale ? ' alerting' : ''}">${renderTrackedCard(server, prefs, key, card.prizes)}</div>`;
   });
   return html;
 }
 
 function renderDraftCard(d){
   const idsValid = HEX24.test(d.machineId || '') && HEX24.test(d.prizeId || '');
+  const sameMachine = idsValid && serverMachines.some(s => s.machineId === d.machineId);
   return `
     <div class="machine-top">
       <input class="machine-name" value="${escapeAttr(d.name || '')}" placeholder="New machine" data-draft="${d.id}" data-field="name" />
@@ -560,7 +601,7 @@ function renderDraftCard(d){
       </div>
       <div class="link-hint ${idsValid ? 'ok' : 'err'}">
         ${idsValid
-          ? 'IDs detected — click Connect live to start tracking. This will be visible to everyone watching this dashboard.'
+          ? (sameMachine ? 'This machine is already on the dashboard — this prize will be added to its existing card (switch with Change Prize). Click Connect live to start tracking it.' : 'IDs detected — click Connect live to start tracking. This will be visible to everyone watching this dashboard.')
           : 'No link entered yet — paste a TokyoCatch game link above to fill these in automatically.'}
       </div>
       <div style="margin-top:8px;">
@@ -570,23 +611,32 @@ function renderDraftCard(d){
   `;
 }
 
-function renderTrackedCard(server, prefs, key){
+function renderTrackedCard(server, prefs, key, prizes){
   const displayName = prefs.name || server.prizeTitleEn || server.prizeTitleJa || key;
   const history = server.history || [];
   const lastFields = server.lastFields || {};
+  const collapsed = getGroupPrefs(server.machineId).collapsed;
+  const prizeName = p => getPrefs(machineKey(p.machineId, p.prizeId)).name || p.prizeTitleEn || p.prizeTitleJa || `Prize ${p.prizeId.slice(0, 6)}…`;
+  const metaParts = [];
+  if(server.gemCost != null) metaParts.push(`Gem cost: <b>${escapeAttr(server.gemCost)}</b>`);
+  if(server.machineType) metaParts.push(`Machine type: <b>${escapeAttr(server.machineType)}</b>`);
+  if(server.prizeLabel) metaParts.push(`Label: <b class="prize-label${server.prizeLabel === 'LAST_CHANCE' ? ' last-chance' : ''}">${escapeAttr(server.prizeLabel)}</b>`);
+  const switcher = prizes.length > 1 ? `
+      <select data-machine="${server.machineId}" data-field="switchPrize" title="Change Prize">
+        ${prizes.map(p => `<option value="${p.prizeId}" ${p.prizeId === server.prizeId ? 'selected' : ''}>${p.prizeStale ? '⚠️ ' : ''}${escapeAttr(prizeName(p))} — ${p.livePlays} play${p.livePlays === 1 ? '' : 's'}</option>`).join('')}
+      </select>` : '';
 
   return `
     <div class="machine-top">
-      ${prefs.collapsed
+      ${collapsed
         ? `<div class="machine-name-static" title="${escapeAttr(displayName)}">${escapeAttr(displayName)}</div>`
         : `<input class="machine-name" value="${escapeAttr(prefs.name || '')}" placeholder="${escapeAttr(server.prizeTitleEn || server.prizeTitleJa || 'New machine')}" data-key="${key}" data-field="name" />`}
       <div class="top-actions">
-        <button class="icon-btn" data-key="${key}" data-action="toggle-collapse">${prefs.collapsed ? 'Expand ▾' : 'Collapse ▲'}</button>
-        <button class="icon-btn" data-key="${key}" data-action="remove">Stop tracking</button>
+        <button class="icon-btn" data-key="${key}" data-action="toggle-collapse">${collapsed ? 'Expand ▾' : 'Collapse ▲'}</button>
       </div>
     </div>
 
-    ${prefs.collapsed ? `
+    ${collapsed ? `
     <div class="machine-summary">
       <span>Plays <b>${server.livePlays}</b></span>
       <span>Alert at <b>${prefs.alertEnabled && prefs.alertPlayTarget ? prefs.alertPlayTarget : '—'}</b></span>
@@ -606,12 +656,15 @@ function renderTrackedCard(server, prefs, key){
       </div>
     </div>` : ''}
 
-    ${server.prizeTitleEn || server.prizeTitleJa || server.gemCost != null || server.machineType ? `
     <div class="prize-info">
       ${server.prizeTitleEn ? `<div class="prize-title-en">${escapeAttr(server.prizeTitleEn)}</div>` : ''}
       ${server.prizeTitleJa ? `<div class="prize-title-ja">${escapeAttr(server.prizeTitleJa)}</div>` : ''}
-      <div class="prize-meta">${server.gemCost != null ? `Gem cost: <b>${escapeAttr(server.gemCost)}</b>` : ''}${server.gemCost != null && server.machineType ? ' &nbsp;·&nbsp; ' : ''}${server.machineType ? `Machine type: <b>${escapeAttr(server.machineType)}</b>` : ''}</div>
-    </div>` : ''}
+      ${!server.prizeTitleEn && !server.prizeTitleJa ? `<div class="prize-title-en">Prize ${escapeAttr(server.prizeId)}</div>` : ''}
+      ${metaParts.length ? `<div class="prize-meta">${metaParts.join(' &nbsp;·&nbsp; ')}</div>` : ''}
+      <div class="prize-actions">${switcher}
+        <button class="ghost danger" data-key="${key}" data-action="remove">Remove Prize</button>
+      </div>
+    </div>
 
     <div class="play-alert">
       <div class="play-alert-title-row">
@@ -826,11 +879,18 @@ document.getElementById('machines').addEventListener('input', (e) => {
     if(HEX24.test(newMachineId) && HEX24.test(newPrizeId)){
       const newKey = machineKey(newMachineId, newPrizeId);
       if(newKey !== key){
-        localPrefs[newKey] = prefs;
-        delete localPrefs[key];
-        savePrefs();
-        sendToRelay({type:'stopTracking', data:{machineId: server.machineId, prizeId: server.prizeId}});
-        sendToRelay({type:'startTracking', data:{machineId: newMachineId, prizeId: newPrizeId}});
+        const alreadyTracked = serverMachines.some(x => machineKey(x.machineId, x.prizeId) === newKey);
+        if(!alreadyTracked){
+          localPrefs[newKey] = prefs;
+          delete localPrefs[key];
+          savePrefs();
+          sendToRelay({type:'stopTracking', data:{machineId: server.machineId, prizeId: server.prizeId}});
+          sendToRelay({type:'startTracking', data:{machineId: newMachineId, prizeId: newPrizeId}});
+        }
+        // If that prize is already tracked, just switch this card to it.
+        getGroupPrefs(newMachineId).selectedPrizeId = newPrizeId;
+        saveGroupPrefs();
+        if(alreadyTracked) render();
       }
     }
   }
@@ -843,6 +903,12 @@ document.getElementById('machines').addEventListener('input', (e) => {
 document.getElementById('machines').addEventListener('change', (e) => {
   const field = e.target.dataset.field;
   const key = e.target.dataset.key;
+  if(field === 'switchPrize'){
+    getGroupPrefs(e.target.dataset.machine).selectedPrizeId = e.target.value;
+    saveGroupPrefs();
+    render();
+    return;
+  }
   if(!key) return;
   const server = serverMachines.find(x => machineKey(x.machineId, x.prizeId) === key);
   if(!server) return;
@@ -895,6 +961,8 @@ document.getElementById('machines').addEventListener('click', (e) => {
       if(d.name) getPrefs(key2).name = d.name;
       savePrefs();
       sendToRelay({type:'startTracking', data:{machineId: d.machineId, prizeId: d.prizeId}});
+      getGroupPrefs(d.machineId).selectedPrizeId = d.prizeId;   // joins the machine's card and becomes the shown prize
+      saveGroupPrefs();
       drafts = drafts.filter(x => x.id !== draftId);
       render();
       return;
@@ -918,12 +986,20 @@ document.getElementById('machines').addEventListener('click', (e) => {
   if(action === 'test-alert'){ playCountAlert(displayName, server.livePlays); return; }
   if(action === 'clear-alert'){ prefs.alertPlayTarget = null; prefs.alertPlayFired = false; savePrefs(); render(); return; }
   if(action === 'remove'){
-    if(!confirm(`Stop tracking "${displayName}"? This is shared — it will stop counting for everyone watching this dashboard, not just you.`)) return;
+    if(!confirm(`Remove prize "${displayName}"? This is shared — it will stop counting for everyone watching this dashboard. Any other prizes on this machine keep tracking.`)) return;
     sendToRelay({type:'stopTracking', data:{machineId: server.machineId, prizeId: server.prizeId}});
     delete localPrefs[key]; savePrefs();
+    const otherPrizes = serverMachines.some(x => x.machineId === server.machineId && x.prizeId !== server.prizeId);
+    if(otherPrizes){
+      const gp = getGroupPrefs(server.machineId);
+      if(gp.selectedPrizeId === server.prizeId) gp.selectedPrizeId = null;
+    } else {
+      delete groupPrefs[server.machineId];
+    }
+    saveGroupPrefs();
     return;
   }
-  if(action === 'toggle-collapse'){ prefs.collapsed = !prefs.collapsed; savePrefs(); render(); return; }
+  if(action === 'toggle-collapse'){ const gp = getGroupPrefs(server.machineId); gp.collapsed = !gp.collapsed; saveGroupPrefs(); render(); return; }
   if(action === 'toggle-alert-section'){ prefs.alertSectionCollapsed = !prefs.alertSectionCollapsed; savePrefs(); render(); return; }
   if(action === 'toggle-payout-section'){ prefs.payoutSectionCollapsed = !prefs.payoutSectionCollapsed; savePrefs(); render(); return; }
   if(action === 'open-tokyocatch'){ openPopup(tokyoCatchUrl(server)); return; }
