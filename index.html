@@ -663,7 +663,7 @@ function renderTrackedCard(server, prefs, key, prizes){
     <div class="play-alert" style="background:#fdeceb;border-color:#e2a89a;">
       <div class="play-alert-title" style="color:#8a2c1c;">⚠️ Prize no longer on this machine</div>
       <div style="font-size:0.85rem;color:var(--ink);line-height:1.5;">
-        TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(server.prizeId)}</code>). Plays are <b>still being counted</b> for everyone watching. To also track the machine's current prize, add its link with "+ Add a machine to track" — it will join this card.
+        TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(server.prizeId)}</code>). ${server.dataSinceStale ? 'Plays are <b>still being counted</b> for everyone watching, but they may belong to the machine\'s new prize.' : 'TokyoCatch is <b>not sending play data</b> for this prize any more, so <b>no new plays are being counted</b> here. Your existing count and history are kept.'} To track the machine's current prize, add its link with "+ Add a machine to track" — it will join this card.
       </div>
     </div>` : ''}
 
