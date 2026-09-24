@@ -40,6 +40,9 @@
   .top-actions{display:flex;gap:4px;align-items:center;flex-shrink:0;}
   .icon-btn{background:none;border:none;color:var(--muted);font-size:0.8rem;cursor:pointer;padding:4px 6px;white-space:nowrap;}
   .machine-summary{display:flex;gap:18px;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);}
+  .machine-summary{flex-wrap:wrap;}
+  .machine-summary .summary-tag{text-transform:none;letter-spacing:normal;font-size:0.85rem;color:var(--ink);}
+  .machine-summary .summary-tag.stale{color:var(--alert);}
   .machine-summary b{color:var(--ink);font-size:0.85rem;text-transform:none;letter-spacing:normal;}
   .icon-btn:hover{color:var(--claw-dark);}
 
@@ -126,6 +129,7 @@
   .category-header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:30px 0 12px;}
   .category-header:first-child{margin-top:6px;}
   .category-header h2{font-size:1.15rem;margin:0;letter-spacing:-0.005em;}
+  .category-extras{color:var(--ink);font-style:normal;}
   .category-summary{font-size:0.85rem;color:var(--muted);font-style:italic;margin:0 0 16px;}
   .category-row{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
   .category-row label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);white-space:nowrap;}
@@ -558,6 +562,14 @@ function renderCategorySection(category, machines){
   const catPrefs = getCategoryPrefs(category);
   const escCat = escapeAttr(category);
   const count = machines.length;
+  // extra counts are over every prize on the cards in this section, not just the one currently shown
+  const allPrizes = machines.flatMap(c => c.prizes);
+  const staleCount = allPrizes.filter(p => p.prizeStale).length;
+  const lastChanceCount = allPrizes.filter(p => p.prizeLabel === 'LAST_CHANCE').length;
+  const extras = [];
+  if(staleCount) extras.push(`${staleCount} irrelevant prize${staleCount === 1 ? '' : 's'}`);
+  if(lastChanceCount) extras.push(`${lastChanceCount} prize${lastChanceCount === 1 ? '' : 's'} last chance`);
+  const extraHtml = extras.length ? ` <span class="category-extras">, ${extras.join(', ')}</span>` : '';
 
   if(catPrefs.collapsed){
     return `
@@ -565,7 +577,7 @@ function renderCategorySection(category, machines){
         <h2>${escCat}</h2>
         <button class="icon-btn" data-action="toggle-category" data-category="${escCat}">Expand ▾</button>
       </div>
-      <div class="category-summary">currently tracking ${count} item${count === 1 ? '' : 's'}</div>
+      <div class="category-summary">currently tracking ${count} item${count === 1 ? '' : 's'}${extraHtml}</div>
     `;
   }
 
@@ -652,6 +664,8 @@ function renderTrackedCard(server, prefs, key, prizes){
       <span>Plays <b>${server.livePlays}</b></span>
       <span>Alert at <b>${prefs.alertEnabled && prefs.alertPlayTarget ? prefs.alertPlayTarget : '—'}</b></span>
       ${server.machineType === 'THREE_CLAW' && server.threeClawPayout != null ? `<span>Payout at <b>${server.threeClawPayout}</b></span>` : ''}
+      ${server.prizeStale ? `<span class="summary-tag stale">Irrelevant Prize</span>` : ''}
+      ${server.prizeLabel ? `<span class="summary-tag">Label: ${escapeAttr(String(server.prizeLabel).toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '))}</span>` : ''}
     </div>
     ` : `
     <div class="category-row">
