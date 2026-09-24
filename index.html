@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Plays Since Last Win — Machine Tracker</title>
+<title>The Chosen Ones</title>
 <style>
   :root{
     --ink:#1c1a24;
@@ -21,8 +21,8 @@
   body{margin:0;background:var(--paper);color:var(--ink);font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;padding:32px 16px 64px;}
   .wrap{max-width:680px;margin:0 auto;}
   header{margin-bottom:24px;}
-  h1{font-size:1.7rem;margin:0 0 4px;letter-spacing:-0.01em;}
-  .sub{color:var(--muted);font-size:0.95rem;line-height:1.55;max-width:60ch;}
+  h1{font-size:2.2rem;font-weight:800;margin:0 0 4px;letter-spacing:-0.01em;}
+  .sub{color:var(--muted);font-size:0.95rem;line-height:1.55;max-width:none;}
   .sub b{color:var(--ink);}
 
   .global-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:20px;font-size:0.8rem;color:var(--muted);flex-wrap:wrap;}
@@ -135,8 +135,8 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>Plays Since Last Win</h1>
-    <div class="sub">Connects to a machine's real-time status feed and counts plays live as they happen. Play counts, win detection, and history are <b>shared with everyone watching this dashboard</b> — tracked by the relay itself, not this browser. <b>Usernames and any past-history rows are always entered by hand</b> — this tool never fetches or scrapes the winner-history page automatically.</div>
+    <h1>The Chosen Ones</h1>
+    <div class="sub">For tracking and treasures and stuff. For the people, kawan mahu lagi prizes.</div>
   </header>
 
   <div class="global-bar" id="globalBar"></div>
@@ -502,9 +502,11 @@ function notificationStatusLabel(){
 function updateGlobalBar(){
   const bar = document.getElementById('globalBar');
   if(!loaded){ bar.innerHTML = ''; return; }
+  const staleCount = serverMachines.filter(x => x.prizeStale).length;
   bar.innerHTML = `
     <div><span class="status-dot ${socketStatus.ok ? 'live' : ''}"></span>${escapeAttr(socketStatus.msg)}</div>
     <div>${new Set(serverMachines.map(x => x.machineId)).size} machine${new Set(serverMachines.map(x => x.machineId)).size === 1 ? '' : 's'} (${serverMachines.length} prize${serverMachines.length === 1 ? '' : 's'}) tracked — shared with everyone watching this dashboard</div>
+    <div style="${staleCount ? 'color:var(--alert);font-weight:600;' : ''}">${staleCount} irrelevant prize${staleCount === 1 ? '' : 's'} (no longer on their machine)</div>
     <div>${escapeAttr(notificationStatusLabel())}</div>
   `;
 }
@@ -652,7 +654,7 @@ function renderTrackedCard(server, prefs, key, prizes){
     <div class="play-alert" style="background:#fdeceb;border-color:#e2a89a;">
       <div class="play-alert-title" style="color:#8a2c1c;">⚠️ Prize no longer on this machine</div>
       <div style="font-size:0.85rem;color:var(--ink);line-height:1.5;">
-        TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(server.prizeId)}</code>). Plays have paused counting for everyone watching. Grab the machine's current prize link and paste it into "TokyoCatch prize link" below to resume tracking under the new prize.
+        TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(server.prizeId)}</code>). Plays are <b>still being counted</b> for everyone watching. To also track the machine's current prize, add its link with "+ Add a machine to track" — it will join this card.
       </div>
     </div>` : ''}
 
