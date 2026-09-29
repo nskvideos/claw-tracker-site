@@ -39,6 +39,10 @@
   .machine-name-static{font-size:1.05rem;font-weight:600;color:var(--ink);padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1;}
   .top-actions{display:flex;gap:4px;align-items:center;flex-shrink:0;}
   .icon-btn{background:none;border:none;color:var(--muted);font-size:0.8rem;cursor:pointer;padding:4px 6px;white-space:nowrap;}
+  .card-head{display:flex;gap:14px;align-items:flex-start;margin-bottom:14px;}
+  .card-head-main{flex:1;min-width:0;}
+  .card-head-main .machine-top{margin-bottom:10px;}
+  .prize-thumb{width:76px;height:76px;object-fit:cover;border-radius:6px;flex-shrink:0;background:#eee;}
   .machine-summary{display:flex;gap:18px;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);}
   .machine-summary{flex-wrap:wrap;}
   .machine-summary .summary-tag{text-transform:none;letter-spacing:normal;font-size:0.85rem;color:var(--ink);}
@@ -642,6 +646,10 @@ function renderTrackedCard(server, prefs, key, prizes){
   const lastFields = server.lastFields || {};
   const collapsed = getGroupPrefs(server.machineId).collapsed;
   const prizeName = p => getPrefs(machineKey(p.machineId, p.prizeId)).name || p.prizeTitleEn || p.prizeTitleJa || `Prize ${p.prizeId.slice(0, 6)}…`;
+  let thumbSrc = server.prizeImageUrl || '';
+  if(thumbSrc.startsWith('//')) thumbSrc = 'https:' + thumbSrc;
+  else if(thumbSrc.startsWith('/')) thumbSrc = 'https://tokyocatch.com' + thumbSrc;
+  const thumb = thumbSrc ? `<img class="prize-thumb" src="${escapeAttr(thumbSrc)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'" />` : '';
   const metaParts = [];
   if(server.gemCost != null) metaParts.push(`Gem cost: <b>${escapeAttr(server.gemCost)}</b>`);
   if(server.machineType) metaParts.push(`Machine type: <b>${escapeAttr(server.machineType)}</b>`);
@@ -652,6 +660,9 @@ function renderTrackedCard(server, prefs, key, prizes){
       </select>` : '';
 
   return `
+    <div class="card-head">
+    ${thumb}
+    <div class="card-head-main">
     <div class="machine-top">
       ${collapsed
         ? `<div class="machine-name-static" title="${escapeAttr(displayName)}">${escapeAttr(displayName)}</div>`
@@ -660,6 +671,7 @@ function renderTrackedCard(server, prefs, key, prizes){
         <button class="icon-btn" data-key="${key}" data-action="toggle-collapse">${collapsed ? 'Expand ▾' : 'Collapse ▲'}</button>
       </div>
     </div>
+    ${collapsed ? '' : '</div></div>'}
 
     ${collapsed ? `
     <div class="machine-summary">
@@ -669,6 +681,7 @@ function renderTrackedCard(server, prefs, key, prizes){
       ${server.prizeStale ? `<span class="summary-tag stale">Irrelevant Prize</span>` : ''}
       ${server.prizeLabel ? `<span class="summary-tag">Label: ${escapeAttr(String(server.prizeLabel).toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '))}</span>` : ''}
     </div>
+    </div></div>
     ` : `
     <div class="category-row">
       <label>Category</label>
