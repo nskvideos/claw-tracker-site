@@ -660,6 +660,8 @@ function renderTrackedCard(server, prefs, key, prizes){
         ${prizes.map(p => `<option value="${p.prizeId}" ${p.prizeId === server.prizeId ? 'selected' : ''}>${p.prizeStale ? '⚠️ ' : ''}${escapeAttr(prizeName(p))} — ${p.livePlays} play${p.livePlays === 1 ? '' : 's'}</option>`).join('')}
       </select>` : '';
 
+  const canMove = prizes.length > 1 && !server.countMovedTo && !server.prizeStale && prizes.some(p => p.prizeId !== server.prizeId && !p.countMovedTo);
+
   return `
     <div class="card-head">
     ${thumb}
@@ -693,8 +695,13 @@ function renderTrackedCard(server, prefs, key, prizes){
     <div class="play-alert" style="background:#fdeceb;border-color:#e2a89a;">
       <div class="play-alert-title" style="color:#8a2c1c;">⚠️ Prize no longer on this machine</div>
       <div style="font-size:0.85rem;color:var(--ink);line-height:1.5;">
-        TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(server.prizeId)}</code>). ${server.dataSinceStale ? 'Plays are <b>still being counted</b> for everyone watching, but they may belong to the machine\'s new prize.' : 'TokyoCatch is <b>not sending play data</b> for this prize any more, so <b>no new plays are being counted</b> here. Your existing count and history are kept.'} To track the machine's current prize, add its link with "+ Add a machine to track" — it will join this card.
+        TokyoCatch reports <b>IrrelevantPrizeForMachine</b> — this machine has moved on to a different prize than the one being tracked here (Prize ID <code>${escapeAttr(server.prizeId)}</code>). ${server.countMovedTo ? 'This prize\'s <b>play count, history and payout were moved</b> to the machine\'s current prize, so nothing more is counted here.' : server.dataSinceStale ? 'Plays are <b>still being counted</b> for everyone watching, but they may belong to the machine\'s new prize.' : 'TokyoCatch is <b>not sending play data</b> for this prize any more, so <b>no new plays are being counted</b> here. Your existing count and history are kept.'} To track the machine's current prize, add its link with "+ Add a machine to track" — it will join this card.
       </div>
+    </div>` : ''}
+    ${server.countMovedTo && !server.prizeStale ? `
+    <div class="play-alert">
+      <div class="play-alert-title">Count moved to another prize</div>
+      <div style="font-size:0.85rem;color:var(--ink);line-height:1.5;">This prize's play count, history and payout were moved to the machine's current prize, so nothing more is counted here.</div>
     </div>` : ''}
 
     <div class="prize-info">
@@ -703,6 +710,7 @@ function renderTrackedCard(server, prefs, key, prizes){
       ${!server.prizeTitleEn && !server.prizeTitleJa ? `<div class="prize-title-en">Prize ${escapeAttr(server.prizeId)}</div>` : ''}
       ${metaParts.length ? `<div class="prize-meta">${metaParts.join(' &nbsp;·&nbsp; ')}</div>` : ''}
       <div class="prize-actions">${switcher}
+        ${canMove ? `<button class="ghost" data-key="${key}" data-action="move-count" title="Move the play count, history and payout from the machine's previous prize onto this one">Move count here</button>` : ''}
         <button class="ghost danger" data-key="${key}" data-action="remove">Remove Prize</button>
       </div>
     </div>
@@ -1043,6 +1051,16 @@ document.getElementById('machines').addEventListener('click', (e) => {
       delete groupPrefs[server.machineId];
     }
     saveGroupPrefs();
+    return;
+  }
+  if(action === 'move-count'){
+    if(server.history && server.history.some(r => r.isWin)){ alert('This prize already has a win of its own recorded, so its count is already after that win. Nothing was moved.'); return; }
+    const nameOf = p => getPrefs(machineKey(p.machineId, p.prizeId)).name || p.prizeTitleEn || p.prizeTitleJa || `Prize ${p.prizeId.slice(0, 6)}…`;
+    const sources = serverMachines.filter(x => x.machineId === server.machineId && x.prizeId !== server.prizeId && !x.countMovedTo);
+    if(!sources.length || server.countMovedTo){ return; }
+    const from = sources.reduce((a, b) => (b.livePlays > a.livePlays ? b : a));
+    if(!confirm(`Move ${from.livePlays} play${from.livePlays === 1 ? '' : 's'} (plus history and payout) from "${nameOf(from)}" to "${displayName}"?\n\nThis is shared and cannot be undone. "${nameOf(from)}" will stop counting.`)) return;
+    sendToRelay({type:'moveCount', data:{machineId: server.machineId, fromPrizeId: from.prizeId, toPrizeId: server.prizeId}});
     return;
   }
   if(action === 'toggle-collapse'){ const gp = getGroupPrefs(server.machineId); gp.collapsed = !gp.collapsed; saveGroupPrefs(); render(); return; }
