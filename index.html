@@ -257,7 +257,7 @@ function applyPlayerCsvText(text, sourceLabel){
 // until "Connect live" is clicked.
 // ---------------------------------------------------------------------------
 const PREFS_KEY = 'tc_local_prefs_v1';
-const RELAY_URL = 'wss://tc-relay-1.onrender.com';
+const RELAY_URL = 'wss://tc-relay-it85.onrender.com';
 
 let loaded = false;
 let serverMachines = [];   // full state objects as broadcast by the relay
@@ -447,8 +447,13 @@ function connectRelay(){
       handleIncomingMachineUpdate(prev, msg.data, key);
       if(idx >= 0) serverMachines[idx] = msg.data; else serverMachines.push(msg.data);
       render();
+    } else if(msg.type === 'history'){
+      const hk = machineKey(msg.data.machineId, msg.data.prizeId);
+      historyCache[hk] = {rev: msg.data.historyRev, rows: msg.data.history || []};
+      render();
     } else if(msg.type === 'machineRemoved'){
       const key = machineKey(msg.data.machineId, msg.data.prizeId);
+      delete historyCache[key]; delete historyAsked[key];
       serverMachines = serverMachines.filter(x => machineKey(x.machineId, x.prizeId) !== key);
       render();
     } else if(msg.type === 'trackingError'){
@@ -473,6 +478,21 @@ function connectRelay(){
 function scheduleReconnect(){
   if(reconnectTimer) return;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connectRelay(); }, 5000);
+}
+
+// Step history is not sent with every update. Expanded cards ask the relay
+// for it, and ask again whenever the relay's historyRev for that prize changes.
+const historyCache = {};   // prize key -> {rev, rows}
+const historyAsked = {};   // prize key -> {rev, at}
+function ensureHistory(server, key){
+  if(!server.historyTotal) return;
+  const rev = server.historyRev || '';
+  const have = historyCache[key];
+  if(have && have.rev === rev) return;
+  const asked = historyAsked[key];
+  if(asked && asked.rev === rev && Date.now() - asked.at < 5000) return;
+  historyAsked[key] = {rev, at: Date.now()};
+  sendToRelay({type:'getHistory', data:{machineId: server.machineId, prizeId: server.prizeId}});
 }
 
 function sendToRelay(obj){
@@ -643,9 +663,10 @@ function renderDraftCard(d){
 
 function renderTrackedCard(server, prefs, key, prizes){
   const displayName = prefs.name || server.prizeTitleEn || server.prizeTitleJa || key;
-  const history = server.history || [];
   const lastFields = server.lastFields || {};
   const collapsed = getGroupPrefs(server.machineId).collapsed;
+  if(!collapsed) ensureHistory(server, key);
+  const history = (historyCache[key] && historyCache[key].rows) || server.history || [];
   const prizeName = p => getPrefs(machineKey(p.machineId, p.prizeId)).name || p.prizeTitleEn || p.prizeTitleJa || `Prize ${p.prizeId.slice(0, 6)}…`;
   let thumbSrc = server.prizeImageUrl || '';
   if(thumbSrc.startsWith('//')) thumbSrc = 'https:' + thumbSrc;
@@ -827,9 +848,9 @@ function renderTrackedCard(server, prefs, key, prizes){
     </div>
 
     <details open>
-      <summary>Step history (${history.length})</summary>
+      <summary>Step history (${server.historyTotal ?? history.length})</summary>
       <div class="history">
-        ${history.length === 0 ? '<div class="hist-empty">No entries yet — plays will appear here as they happen.</div>' :
+        ${history.length === 0 ? (server.historyTotal > 0 ? '<div class="hist-empty">Loading history…</div>' : '<div class="hist-empty">No entries yet — plays will appear here as they happen.</div>') :
           `<table class="step-table">
             <thead><tr><th class="step-num">Step</th><th>Played by</th><th>Play time</th></tr></thead>
             <tbody>
