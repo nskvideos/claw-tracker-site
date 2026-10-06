@@ -109,14 +109,10 @@
   .step-table tr.win .player-link, .step-table tr.win .time-link{color:#0f6e56;font-weight:700;}
   .step-table .trophy{margin-right:3px;}
   .hist-empty{font-size:0.82rem;color:var(--muted);font-style:italic;}
-  .who-row{display:flex;gap:8px;align-items:center;margin-bottom:10px;}
-  .who-row input{flex:1;border:1px solid var(--line);background:white;border-radius:6px;padding:6px 9px;font-size:0.85rem;font-family:inherit;}
-  .who-row label{font-size:0.72rem;color:var(--muted);white-space:nowrap;}
 
   .add-machine{display:block;width:100%;padding:14px;border-radius:12px;border:1.5px dashed var(--line);background:none;color:var(--muted);font-size:0.95rem;cursor:pointer;font-family:inherit;margin-bottom:16px;}
   .add-machine:hover{border-color:var(--claw);color:var(--claw-dark);}
   .empty-state{text-align:center;padding:40px 20px;color:var(--muted);font-size:0.9rem;}
-  .note{font-size:0.78rem;color:var(--muted);line-height:1.5;margin-top:6px;}
 
   .play-alert{background:#fff4ef;border:2px solid #f08b6e;border-radius:10px;padding:14px;margin:12px 0;}
   .play-alert-title{font-weight:800;color:#b33b20;margin-bottom:8px;}
@@ -250,9 +246,11 @@ function applyPlayerCsvText(text, sourceLabel){
 //
 // The relay is now the single source of truth for which machines exist, plus
 // their livePlays/lastStatus/history/lastAutoWin/prize info — that's
-// `serverMachines`, rebuilt from the relay's broadcasts. Everything personal
-// (display name override, alert threshold, THREE_CLAW rate, section
-// collapse state) stays local, keyed by "machineId:prizeId" in `localPrefs`.
+// `serverMachines`, rebuilt from the relay's broadcasts (step history is
+// fetched separately, see `historyCache`). Only personal settings (display
+// name override, alert threshold, section collapse state) stay local, keyed
+// by "machineId:prizeId" in `localPrefs`. The THREE_CLAW payout numbers are
+// shared and live on the relay.
 // A machine being added but not yet sent to the relay lives in `drafts`
 // until "Connect live" is clicked.
 // ---------------------------------------------------------------------------
