@@ -306,7 +306,7 @@
 // then paste the result into PASS_HASH below. Anyone who entered the old password
 // is asked again. This keeps casual visitors out; it is not strong security.
 (function(){
-  const PASS_HASH = '';   // leave empty for no password; paste a hash here to turn the password box on
+  const PASS_HASH = '08a3d2dc7693d7166eef51ec0194ae6009c7636af128d4a208a14d1b5293c3cd';   // password box is on; to change the password see the console instructions above, or set '' for none
   const KEY = 'tc_access_v1';
   const root = document.documentElement;
   const queue = [];
@@ -477,7 +477,7 @@ function applyPlayerCsvText(text){
 // until "Connect live" is clicked.
 // ---------------------------------------------------------------------------
 const PREFS_KEY = 'tc_local_prefs_v1';
-const RELAY_URL = 'wss://YOUR-RELAY-NAME.onrender.com';   // <-- CHANGE: your relay's Render address, starting wss://
+const RELAY_URL = 'wss://tc-relay-1.onrender.com';
 
 let loaded = false;
 let gotList = false;   // true once the relay has sent the machine list
